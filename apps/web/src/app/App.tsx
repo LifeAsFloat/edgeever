@@ -16,9 +16,11 @@ import StarterKit from "@tiptap/starter-kit";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
+  Bold,
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  Code2,
   ExternalLink,
   File as FileIcon,
   FilePlus2,
@@ -27,25 +29,43 @@ import {
   History,
   ImageIcon,
   Inbox,
+  Italic,
   KeyRound,
   LayoutList,
+  List,
+  ListOrdered,
   LockKeyhole,
   LogOut,
   Merge,
+  Minus,
   MoreHorizontal,
   PanelLeft,
   Pencil,
+  Pilcrow,
   Plus,
+  Quote,
   RotateCcw,
   Save,
   Search,
   ShieldCheck,
   Sparkles,
+  Strikethrough,
   Tags,
   Trash2,
+  Undo2,
   X,
+  Redo2,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { api } from "@/lib/api";
 import { compressImageForUpload } from "@/lib/image-compression";
 import { localDb } from "@/lib/local-db";
@@ -1574,6 +1594,210 @@ const formatRevisionActor = (actor: string) => {
   return actor || "system";
 };
 
+const EditorToolbar = ({ editor, readOnly }: { editor: Editor | null; readOnly: boolean }) => {
+  const disabled = readOnly || !editor;
+  const blockValue = getActiveBlockValue(editor);
+  const canRun = (command: (editor: Editor) => boolean) => {
+    if (!editor || readOnly) {
+      return false;
+    }
+
+    return command(editor);
+  };
+  const run = (command: (editor: Editor) => void) => {
+    if (!editor || readOnly) {
+      return;
+    }
+
+    command(editor);
+  };
+
+  const setBlock = (value: string) => {
+    run((current) => {
+      const chain = current.chain().focus();
+
+      if (value === "paragraph") {
+        chain.setParagraph().run();
+        return;
+      }
+
+      if (value === "heading-1") {
+        chain.setHeading({ level: 1 }).run();
+        return;
+      }
+
+      if (value === "heading-2") {
+        chain.setHeading({ level: 2 }).run();
+        return;
+      }
+
+      if (value === "heading-3") {
+        chain.setHeading({ level: 3 }).run();
+      }
+    });
+  };
+
+  return (
+    <div className="flex min-h-12 items-center gap-2 overflow-x-auto border-t border-emerald-100 bg-emerald-50/35 px-3 py-2 sm:px-5">
+      <select
+        className="h-8 w-28 shrink-0 rounded-md border border-emerald-100 bg-white px-2 text-xs font-medium text-emerald-950 outline-none disabled:opacity-50"
+        value={blockValue}
+        disabled={disabled}
+        onChange={(event) => setBlock(event.target.value)}
+        title="段落样式"
+      >
+        <option value="paragraph">正文</option>
+        <option value="heading-1">标题 1</option>
+        <option value="heading-2">标题 2</option>
+        <option value="heading-3">标题 3</option>
+      </select>
+
+      <ToolbarDivider />
+      <EditorToolbarButton
+        title="撤销"
+        disabled={!canRun((current) => current.can().chain().focus().undo().run())}
+        onClick={() => run((current) => current.chain().focus().undo().run())}
+      >
+        <Undo2 className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="重做"
+        disabled={!canRun((current) => current.can().chain().focus().redo().run())}
+        onClick={() => run((current) => current.chain().focus().redo().run())}
+      >
+        <Redo2 className="h-4 w-4" />
+      </EditorToolbarButton>
+
+      <ToolbarDivider />
+      <EditorToolbarButton
+        title="加粗"
+        active={Boolean(editor?.isActive("bold"))}
+        disabled={!canRun((current) => current.can().chain().focus().toggleBold().run())}
+        onClick={() => run((current) => current.chain().focus().toggleBold().run())}
+      >
+        <Bold className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="斜体"
+        active={Boolean(editor?.isActive("italic"))}
+        disabled={!canRun((current) => current.can().chain().focus().toggleItalic().run())}
+        onClick={() => run((current) => current.chain().focus().toggleItalic().run())}
+      >
+        <Italic className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="删除线"
+        active={Boolean(editor?.isActive("strike"))}
+        disabled={!canRun((current) => current.can().chain().focus().toggleStrike().run())}
+        onClick={() => run((current) => current.chain().focus().toggleStrike().run())}
+      >
+        <Strikethrough className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="行内代码"
+        active={Boolean(editor?.isActive("code"))}
+        disabled={!canRun((current) => current.can().chain().focus().toggleCode().run())}
+        onClick={() => run((current) => current.chain().focus().toggleCode().run())}
+      >
+        <Code2 className="h-4 w-4" />
+      </EditorToolbarButton>
+
+      <ToolbarDivider />
+      <EditorToolbarButton
+        title="无序列表"
+        active={Boolean(editor?.isActive("bulletList"))}
+        disabled={disabled}
+        onClick={() => run((current) => current.chain().focus().toggleBulletList().run())}
+      >
+        <List className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="有序列表"
+        active={Boolean(editor?.isActive("orderedList"))}
+        disabled={disabled}
+        onClick={() => run((current) => current.chain().focus().toggleOrderedList().run())}
+      >
+        <ListOrdered className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="引用"
+        active={Boolean(editor?.isActive("blockquote"))}
+        disabled={disabled}
+        onClick={() => run((current) => current.chain().focus().toggleBlockquote().run())}
+      >
+        <Quote className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="代码块"
+        active={Boolean(editor?.isActive("codeBlock"))}
+        disabled={disabled}
+        onClick={() => run((current) => current.chain().focus().toggleCodeBlock().run())}
+      >
+        <Pilcrow className="h-4 w-4" />
+      </EditorToolbarButton>
+      <EditorToolbarButton
+        title="分割线"
+        disabled={disabled}
+        onClick={() => run((current) => current.chain().focus().setHorizontalRule().run())}
+      >
+        <Minus className="h-4 w-4" />
+      </EditorToolbarButton>
+    </div>
+  );
+};
+
+const EditorToolbarButton = ({
+  active = false,
+  children,
+  disabled = false,
+  onClick,
+  title,
+}: {
+  active?: boolean;
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+  title: string;
+}) => (
+  <button
+    className={cn(
+      "flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-emerald-900 transition disabled:pointer-events-none disabled:opacity-40",
+      active
+        ? "border-emerald-300 bg-emerald-100 text-emerald-950"
+        : "border-transparent bg-white/70 hover:border-emerald-200 hover:bg-white"
+    )}
+    type="button"
+    title={title}
+    disabled={disabled}
+    onMouseDown={(event) => event.preventDefault()}
+    onClick={onClick}
+  >
+    {children}
+  </button>
+);
+
+const ToolbarDivider = () => <div className="h-6 w-px shrink-0 bg-emerald-100" />;
+
+const getActiveBlockValue = (editor: Editor | null) => {
+  if (!editor) {
+    return "paragraph";
+  }
+
+  if (editor.isActive("heading", { level: 1 })) {
+    return "heading-1";
+  }
+
+  if (editor.isActive("heading", { level: 2 })) {
+    return "heading-2";
+  }
+
+  if (editor.isActive("heading", { level: 3 })) {
+    return "heading-3";
+  }
+
+  return "paragraph";
+};
+
 const EditorPane = ({
   memo,
   isTrashView,
@@ -1603,6 +1827,7 @@ const EditorPane = ({
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error" | "conflict">("idle");
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [dirtyVersion, setDirtyVersion] = useState(0);
+  const [, setEditorStateVersion] = useState(0);
   const [imageUploadState, setImageUploadState] = useState<"idle" | "compressing" | "uploading" | "error">("idle");
   const [historyOpen, setHistoryOpen] = useState(false);
   const memoRef = useRef<MemoDetail | null>(memo);
@@ -1669,7 +1894,7 @@ const EditorPane = ({
       }),
     ],
     content: memo?.contentJson ?? { type: "doc", content: [{ type: "paragraph" }] },
-    editable: !memo?.isDeleted,
+    editable: Boolean(memo && !memo.isDeleted && !isTrashView),
     editorProps: {
       attributes: {
         class: "prose prose-slate max-w-none",
@@ -1710,6 +1935,22 @@ const EditorPane = ({
       if (editorRef.current === editor) {
         editorRef.current = null;
       }
+    };
+  }, [editor]);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+
+    const refreshToolbar = () => setEditorStateVersion((version) => version + 1);
+
+    editor.on("selectionUpdate", refreshToolbar);
+    editor.on("transaction", refreshToolbar);
+
+    return () => {
+      editor.off("selectionUpdate", refreshToolbar);
+      editor.off("transaction", refreshToolbar);
     };
   }, [editor]);
 
@@ -1777,7 +2018,7 @@ const EditorPane = ({
 
     const sameMemo = editingMemoIdRef.current === memo.id;
     memoRef.current = memo;
-    currentEditor?.setEditable(!memo.isDeleted);
+    currentEditor?.setEditable(!memo.isDeleted && !isTrashView);
 
     if (sameMemo && hasUnsavedChangesRef.current && !memo.isDeleted) {
       return;
@@ -1798,7 +2039,7 @@ const EditorPane = ({
     window.setTimeout(() => {
       hydratingRef.current = false;
     }, 0);
-  }, [memo, editor]);
+  }, [isTrashView, memo, editor]);
 
   useEffect(() => {
     if (!editor || !memo) {
@@ -2035,6 +2276,7 @@ const EditorPane = ({
             />
           </label>
         </div>
+        <EditorToolbar editor={editor} readOnly={readOnly} />
       </header>
 
       <div className="edgeever-editor min-h-0 flex-1 overflow-y-auto">

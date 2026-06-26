@@ -79,6 +79,46 @@ textarea {
   margin: 0.25rem 0;
 }
 
+.ProseMirror blockquote {
+  margin: 0 0 1rem;
+  border-left: 3px solid #34d399;
+  padding: 0.1rem 0 0.1rem 1rem;
+  color: #475569;
+  background: #ecfdf5;
+}
+
+.ProseMirror code {
+  border: 1px solid #d1fae5;
+  border-radius: 5px;
+  background: #ecfdf5;
+  padding: 0.08rem 0.28rem;
+  font-size: 0.9em;
+  color: #064e3b;
+}
+
+.ProseMirror pre {
+  margin: 0 0 1rem;
+  overflow-x: auto;
+  border: 1px solid #d1fae5;
+  border-radius: 8px;
+  background: #0f172a;
+  padding: 0.9rem 1rem;
+  color: #ecfdf5;
+}
+
+.ProseMirror pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.ProseMirror hr {
+  margin: 1.5rem 0;
+  border: 0;
+  border-top: 1px solid #a7f3d0;
+}
+
 .ProseMirror img {
   display: block;
   max-width: 100%;
