@@ -17,6 +17,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
+  ArrowDownWideNarrow,
   Bold,
   ChevronLeft,
   CheckSquare,
@@ -59,6 +60,7 @@ import {
   SquareCode,
   Star,
   Strikethrough,
+  TagX,
   Tags,
   Trash2,
   Undo2,
@@ -112,6 +114,7 @@ type MemoTemplate = {
 };
 
 const IMAGE_COMPRESSION_STORAGE_KEY = "edgeever.imageCompressionEnabled";
+const MEMO_LIST_DENSITY_STORAGE_KEY = "edgeever.memoListDensity";
 const MEMO_LIST_WIDTH_STORAGE_KEY = "edgeever.memoListWidth";
 const DEFAULT_MEMO_LIST_WIDTH_PX = 360;
 const MIN_MEMO_LIST_WIDTH_PX = 300;
@@ -1054,6 +1057,23 @@ const writeImageCompressionPreference = (enabled: boolean) => {
   }
 };
 
+const readMemoListDensityPreference = (): MemoListDensity => {
+  try {
+    const density = window.localStorage.getItem(MEMO_LIST_DENSITY_STORAGE_KEY);
+    return density === "compact" ? "compact" : "preview";
+  } catch {
+    return "preview";
+  }
+};
+
+const writeMemoListDensityPreference = (density: MemoListDensity) => {
+  try {
+    window.localStorage.setItem(MEMO_LIST_DENSITY_STORAGE_KEY, density);
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
 const clampMemoListWidth = (width: number) =>
   Math.min(MAX_MEMO_LIST_WIDTH_PX, Math.max(MIN_MEMO_LIST_WIDTH_PX, Math.round(width)));
 
@@ -1907,9 +1927,14 @@ const mobileSortOptions: Array<{ value: MemoSortMode; label: string }> = [
   { value: "created-desc", label: "创建时间" },
   { value: "title-asc", label: "标题 A-Z" },
 ];
+const memoListDensityOptions: Array<{ value: MemoListDensity; label: string; icon: ReactNode }> = [
+  { value: "preview", label: "卡片预览", icon: <LayoutList className="h-4 w-4" /> },
+  { value: "compact", label: "紧凑列表", icon: <List className="h-4 w-4" /> },
+];
 
 const MobileListActionsSheet = ({
   canSelectMemos,
+  listDensity,
   sortMode,
   onClose,
   onEnterSelectionMode,
@@ -1917,9 +1942,11 @@ const MobileListActionsSheet = ({
   onOpenSettings,
   onOpenTags,
   onOpenTrash,
+  onListDensityChange,
   onSortModeChange,
 }: {
   canSelectMemos: boolean;
+  listDensity: MemoListDensity;
   sortMode: MemoSortMode;
   onClose: () => void;
   onEnterSelectionMode: () => void;
@@ -1927,11 +1954,12 @@ const MobileListActionsSheet = ({
   onOpenSettings: () => void;
   onOpenTags: () => void;
   onOpenTrash: () => void;
+  onListDensityChange: (value: MemoListDensity) => void;
   onSortModeChange: (value: MemoSortMode) => void;
 }) => (
   <div className="fixed inset-0 z-50 bg-slate-950/25 px-3 pb-[calc(5.25rem+env(safe-area-inset-bottom))] lg:hidden" onClick={onClose}>
     <section
-      className="absolute inset-x-3 bottom-[calc(5.25rem+env(safe-area-inset-bottom))] overflow-hidden rounded-md border border-slate-200 bg-white shadow-panel"
+      className="absolute inset-x-3 bottom-[calc(5.25rem+env(safe-area-inset-bottom))] max-h-[calc(100dvh_-_6.75rem_-_env(safe-area-inset-bottom))] overflow-hidden rounded-md border border-slate-200 bg-white shadow-panel"
       onClick={(event) => event.stopPropagation()}
     >
       <MobileSheetGrabber />
@@ -1941,13 +1969,29 @@ const MobileListActionsSheet = ({
           <X className="h-4 w-4" />
         </Button>
       </header>
-      <div className="p-2">
+      <div className="max-h-[calc(100dvh_-_10.25rem_-_env(safe-area-inset-bottom))] overflow-y-auto p-2">
         <MobileListActionButton
           disabled={!canSelectMemos}
           icon={<CheckSquare className="h-4 w-4" />}
           label="选择笔记"
           onClick={onEnterSelectionMode}
         />
+
+        <div className="my-2 h-px bg-slate-100" />
+
+        <div className="px-3 py-2 text-xs font-semibold text-slate-400">显示方式</div>
+        {memoListDensityOptions.map((option) => (
+          <button
+            key={option.value}
+            className="flex h-11 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-medium text-slate-800 transition hover:bg-slate-50"
+            type="button"
+            onClick={() => onListDensityChange(option.value)}
+          >
+            <span className="text-slate-500">{option.icon}</span>
+            <span className="min-w-0 flex-1 truncate">{option.label}</span>
+            <CheckCircle2 className={cn("h-4 w-4 shrink-0", listDensity === option.value ? "text-emerald-600" : "text-transparent")} />
+          </button>
+        ))}
 
         <div className="my-2 h-px bg-slate-100" />
 
@@ -2068,12 +2112,23 @@ const MobileMoveSheet = ({
   onClose: () => void;
   onMove: (notebookId: string) => void;
 }) => {
+  const [notebookSearch, setNotebookSearch] = useState("");
   const options = useMemo(() => getNotebookMoveOptions(notebooks), [notebooks]);
+  const moveSearchQuery = notebookSearch.trim().toLocaleLowerCase("zh-CN");
+  const filteredOptions = useMemo(() => {
+    if (!moveSearchQuery) {
+      return options;
+    }
+
+    return options.filter((option) =>
+      [option.name, option.selectLabel, option.slug ?? ""].some((value) => value.toLocaleLowerCase("zh-CN").includes(moveSearchQuery))
+    );
+  }, [moveSearchQuery, options]);
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/25 px-3 pb-[calc(5.25rem+env(safe-area-inset-bottom))] lg:hidden" onClick={onClose}>
       <section
-        className="absolute inset-x-3 bottom-[calc(5.25rem+env(safe-area-inset-bottom))] max-h-[52dvh] overflow-hidden rounded-md border border-slate-200 bg-white shadow-panel"
+        className="absolute inset-x-3 bottom-[calc(5.25rem+env(safe-area-inset-bottom))] max-h-[calc(100dvh_-_6.75rem_-_env(safe-area-inset-bottom))] overflow-hidden rounded-md border border-slate-200 bg-white shadow-panel"
         onClick={(event) => event.stopPropagation()}
       >
         <MobileSheetGrabber />
@@ -2083,8 +2138,37 @@ const MobileMoveSheet = ({
             <X className="h-4 w-4" />
           </Button>
         </header>
-        <div className="max-h-[calc(52dvh-3rem)] overflow-y-auto p-2">
-          {options.map((option) => (
+        <div className="border-b border-slate-100 px-3 py-2">
+          <div className="flex h-9 items-center gap-2 rounded-md bg-slate-100 px-3 text-sm text-slate-500">
+            <Search className="h-4 w-4" />
+            <input
+              className="min-w-0 flex-1 bg-transparent text-slate-900 outline-none placeholder:text-slate-400"
+              value={notebookSearch}
+              placeholder="搜索笔记本"
+              onChange={(event) => setNotebookSearch(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && notebookSearch) {
+                  event.preventDefault();
+                  setNotebookSearch("");
+                }
+              }}
+            />
+            {notebookSearch ? (
+              <button
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-400 transition hover:bg-white hover:text-slate-700"
+                type="button"
+                title="清空搜索"
+                aria-label="清空搜索"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setNotebookSearch("")}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <div className="max-h-[calc(100dvh_-_13.75rem_-_env(safe-area-inset-bottom))] overflow-y-auto p-2">
+          {filteredOptions.length > 0 ? filteredOptions.map((option) => (
             <button
               key={option.id}
               className={cn(
@@ -2098,8 +2182,11 @@ const MobileMoveSheet = ({
             >
               {option.slug === "inbox" ? <Inbox className="h-4 w-4 shrink-0" /> : <Folder className="h-4 w-4 shrink-0" />}
               <span className="min-w-0 flex-1 truncate">{option.name}</span>
+              {option.id === selectedNotebookId ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" /> : null}
             </button>
-          ))}
+          )) : (
+            <div className="px-3 py-8 text-center text-sm font-medium text-slate-500">没有找到笔记本</div>
+          )}
         </div>
       </section>
     </div>
@@ -2448,7 +2535,7 @@ const MemoListPane = ({
   const [contextMoveOpen, setContextMoveOpen] = useState(false);
   const [filterMode, setFilterMode] = useState<MemoFilterMode>("all");
   const [sortMode, setSortMode] = useState<MemoSortMode>("updated-desc");
-  const [listDensity, setListDensity] = useState<MemoListDensity>("preview");
+  const [listDensity, setListDensity] = useState<MemoListDensity>(() => readMemoListDensityPreference());
   const [lastSelectedMemoId, setLastSelectedMemoId] = useState<string | null>(null);
   const filterOptions = MEMO_FILTER_OPTIONS;
   const mobileFilterOptions = useMemo(() => filterOptions.filter((option) => option.value !== "all"), [filterOptions]);
@@ -2587,6 +2674,11 @@ const MemoListPane = ({
     searchInputRef.current?.focus();
   };
 
+  const handleListDensityChange = (value: MemoListDensity) => {
+    setListDensity(value);
+    writeMemoListDensityPreference(value);
+  };
+
   const handleListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!window.matchMedia("(min-width: 1024px)").matches) {
       return;
@@ -2712,7 +2804,7 @@ const MemoListPane = ({
           onOpenTags={onOpenTags}
           onOpenTemplates={onOpenTemplates}
         />
-        <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="mb-3 flex items-center justify-between gap-3 lg:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <button
               className="flex min-w-0 items-center gap-1 rounded-md px-1 py-1 text-left transition hover:bg-emerald-50 lg:hidden"
@@ -2731,7 +2823,15 @@ const MemoListPane = ({
               </div>
             </div>
           </div>
-          <div className="hidden shrink-0 items-center gap-1 lg:flex">
+        </div>
+        <div className="mb-3 hidden min-w-0 lg:block">
+          <div className="truncate text-lg font-semibold leading-6 text-slate-950">{listTitle}</div>
+          <div className="mt-0.5 truncate text-xs text-slate-500">
+            {listContextLabel} · {listCountLabel}
+          </div>
+        </div>
+        <div className="mb-3 hidden items-center justify-between gap-2 lg:flex">
+          <div className="flex min-w-0 items-center gap-1">
             <Button
               size="icon"
               variant="ghost"
@@ -2744,13 +2844,14 @@ const MemoListPane = ({
             <div className="relative" ref={desktopFilterRef}>
               <button
                 className={cn(
-                  "flex h-8 items-center gap-1 rounded-md border px-2 text-xs font-medium transition",
+                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-xs font-medium transition",
                   filterMode === "all"
                     ? "border-emerald-100 bg-white text-slate-600 hover:bg-emerald-50 hover:text-emerald-800"
                     : "border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
                 )}
                 type="button"
                 title={`筛选：${activeFilterLabel}`}
+                aria-label={`筛选：${activeFilterLabel}`}
                 aria-expanded={desktopFilterOpen}
                 onClick={() => {
                   setDesktopSortOpen(false);
@@ -2759,7 +2860,6 @@ const MemoListPane = ({
                 }}
               >
                 {getMobileFilterIcon(filterMode)}
-                <ChevronDown className="h-3.5 w-3.5" />
               </button>
               {desktopFilterOpen ? (
                 <div className="absolute right-0 top-9 z-30 w-44 overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-panel">
@@ -2785,9 +2885,10 @@ const MemoListPane = ({
             </div>
             <div className="relative" ref={desktopSortRef}>
               <button
-                className="flex h-8 items-center gap-1 rounded-md border border-emerald-100 bg-white px-2 text-xs font-medium text-slate-600 transition hover:bg-emerald-50 hover:text-emerald-800"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-emerald-100 bg-white text-xs font-medium text-slate-600 transition hover:bg-emerald-50 hover:text-emerald-800"
                 type="button"
                 title={`排序：${activeSortLabel}`}
+                aria-label={`排序：${activeSortLabel}`}
                 aria-expanded={desktopSortOpen}
                 onClick={() => {
                   setDesktopFilterOpen(false);
@@ -2795,8 +2896,7 @@ const MemoListPane = ({
                   setDesktopSortOpen((value) => !value);
                 }}
               >
-                <LayoutList className="h-4 w-4" />
-                <ChevronDown className="h-3.5 w-3.5" />
+                <ArrowDownWideNarrow className="h-4 w-4" />
               </button>
               {desktopSortOpen ? (
                 <div className="absolute right-0 top-9 z-30 w-44 overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-panel">
@@ -2819,30 +2919,32 @@ const MemoListPane = ({
                 </div>
               ) : null}
             </div>
-            <div className="flex h-8 overflow-hidden rounded-md border border-emerald-100 bg-white">
+            <div className="flex h-8 shrink-0 overflow-hidden rounded-md border border-emerald-100 bg-white">
               <button
                 className={cn(
-                  "flex h-8 w-8 items-center justify-center transition",
+                  "flex h-8 w-8 shrink-0 items-center justify-center transition",
                   listDensity === "preview" ? "bg-emerald-100 text-emerald-950" : "text-slate-500 hover:bg-emerald-50"
                 )}
                 type="button"
                 title="预览列表"
-                onClick={() => setListDensity("preview")}
+                onClick={() => handleListDensityChange("preview")}
               >
                 <LayoutList className="h-4 w-4" />
               </button>
               <button
                 className={cn(
-                  "flex h-8 w-8 items-center justify-center border-l border-emerald-100 transition",
+                  "flex h-8 w-8 shrink-0 items-center justify-center border-l border-emerald-100 transition",
                   listDensity === "compact" ? "bg-emerald-100 text-emerald-950" : "text-slate-500 hover:bg-emerald-50"
                 )}
                 type="button"
                 title="紧凑列表"
-                onClick={() => setListDensity("compact")}
+                onClick={() => handleListDensityChange("compact")}
               >
                 <List className="h-4 w-4" />
               </button>
             </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
             <Button
               size="icon"
               variant="solid"
@@ -3226,6 +3328,7 @@ const MemoListPane = ({
       {mobileListActionsOpen ? (
         <MobileListActionsSheet
           canSelectMemos={canEnterSelectionMode}
+          listDensity={listDensity}
           sortMode={sortMode}
           onClose={() => setMobileListActionsOpen(false)}
           onEnterSelectionMode={() => {
@@ -3247,6 +3350,10 @@ const MemoListPane = ({
           onOpenTrash={() => {
             setMobileListActionsOpen(false);
             onOpenTrash();
+          }}
+          onListDensityChange={(value) => {
+            handleListDensityChange(value);
+            setMobileListActionsOpen(false);
           }}
           onSortModeChange={(value) => {
             setSortMode(value);
@@ -3340,7 +3447,7 @@ const getMobileFilterIcon = (filterMode: MemoFilterMode) => {
   }
 
   if (filterMode === "untagged") {
-    return <X className="h-4 w-4" />;
+    return <TagX className="h-4 w-4" />;
   }
 
   if (filterMode === "pinned") {
@@ -3630,7 +3737,8 @@ const MemoCard = ({
     <article
       data-memo-id={memo.id}
       className={cn(
-        "group overflow-hidden rounded-xl border border-slate-100 bg-white shadow-[0_10px_26px_rgba(15,23,42,0.06)] transition lg:rounded-none lg:border-x-0 lg:border-t-0 lg:border-slate-200 lg:shadow-none lg:last:border-b-0",
+        "group overflow-hidden border border-slate-100 bg-white transition lg:rounded-none lg:border-x-0 lg:border-t-0 lg:border-slate-200 lg:shadow-none lg:last:border-b-0",
+        listDensity === "compact" ? "rounded-md shadow-none" : "rounded-xl shadow-[0_10px_26px_rgba(15,23,42,0.06)]",
         !selectionMode && selected
           ? "lg:bg-slate-200"
           : checked
@@ -3638,7 +3746,7 @@ const MemoCard = ({
             : "active:bg-slate-50 lg:hover:bg-slate-50"
       )}
     >
-      <div className={cn("flex min-h-[132px] items-center", listDensity === "compact" && "lg:min-h-[76px]")}>
+      <div className={cn("flex min-h-[132px] items-center", listDensity === "compact" && "min-h-[84px] lg:min-h-[76px]")}>
         {showSelectionControl ? (
           <button
             className={cn(
@@ -3659,6 +3767,7 @@ const MemoCard = ({
         <button
           className={cn(
             "min-w-0 flex-1 select-none px-4 py-4 text-left touch-pan-y [-webkit-touch-callout:none] lg:py-4",
+            listDensity === "compact" && "py-3",
             showSelectionControl && "pl-3 lg:pl-3",
             multiSelectKeyDown && "cursor-copy"
           )}
@@ -3672,16 +3781,18 @@ const MemoCard = ({
           onContextMenu={handleContextMenu}
           title="Ctrl/Cmd 点击切换选择，Shift 点击连续选择，移动端长按进入选择"
         >
-          <div className="mb-2 truncate text-base font-semibold leading-6 text-slate-900 lg:text-base">{memoTitle}</div>
+          <div className={cn("mb-2 truncate text-base font-semibold leading-6 text-slate-900 lg:text-base", listDensity === "compact" && "mb-1")}>
+            {memoTitle}
+          </div>
           <div
             className={cn(
               "line-clamp-2 min-h-10 text-[15px] leading-5 text-slate-600",
-              listDensity === "compact" && "lg:line-clamp-1 lg:min-h-0 lg:text-sm"
+              listDensity === "compact" && "line-clamp-1 min-h-0 text-sm"
             )}
           >
             {memoExcerpt}
           </div>
-          <div className={cn("mt-5 flex flex-wrap items-center gap-2", listDensity === "compact" && "lg:mt-2")}>
+          <div className={cn("mt-5 flex flex-wrap items-center gap-2", listDensity === "compact" && "mt-2")}>
             <time className="text-xs font-medium text-slate-400 lg:text-sm lg:font-normal lg:text-slate-500">{formatMemoPreviewDate(memo.updatedAt)}</time>
             {memo.tags.slice(0, 3).map((tag) => (
               <span key={tag} className="rounded-sm bg-emerald-50 px-1.5 py-0.5 text-xs font-medium text-emerald-700">
@@ -5210,7 +5321,7 @@ const EditorPane = ({
             <Button className="lg:hidden" size="icon" variant="ghost" title="返回列表" onClick={onBackToList}>
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <div className="flex items-center gap-1 lg:hidden">
+            <div className="hidden items-center gap-1 sm:flex lg:hidden">
               <button
                 className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-30"
                 type="button"
