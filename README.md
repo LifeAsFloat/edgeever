@@ -171,7 +171,7 @@ bun run cli -- --profile prod search edgeever
 bun run cli -- --profile prod export <memo-id> --format markdown --out ./memo.md
 ```
 
-从印象笔记迁移到 EdgeEver 时，请先准备开放、可读取的 ENEX 文件，再使用 PC 端应用内导入入口或命令行工具逐个笔记本确认导入结果。详见：[从印象笔记迁移到 EdgeEver](docs/evernote-migration.md)。
+从印象笔记迁移到 EdgeEver 时，请先准备开放、可读取的 ENEX 文件，再使用 PC 端应用内“导入印象笔记”入口逐个笔记本确认导入结果。入口旁的“操作指引”会在新标签页打开迁移步骤。
 
 ## 图片压缩规则
 
