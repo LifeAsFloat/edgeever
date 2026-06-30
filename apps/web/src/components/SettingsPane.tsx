@@ -186,6 +186,22 @@ const getEdgeEverBaseUrl = () => {
   return window.location.origin;
 };
 
+const buildMcpRemoteConfig = (token: string) =>
+  JSON.stringify(
+    {
+      mcpServers: {
+        edgeever: {
+          url: getMcpRemoteServerUrl(),
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      },
+    },
+    null,
+    2
+  );
+
 const McpTitleWithHelp = () => {
   const baseUrl = getEdgeEverBaseUrl();
   const [copied, setCopied] = useState(false);
@@ -337,16 +353,21 @@ interface TokenListProps {
 }
 
 const TokenList = ({ tokens, isLoading, isRevoking, onRevoke }: TokenListProps) => {
-  const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
+  const [copiedAction, setCopiedAction] = useState<{ tokenId: string; action: "token" | "config" } | null>(null);
 
-  const handleCopy = async (token: ApiToken) => {
-    if (!token.token || !(await copyTextToClipboard(token.token))) {
+  const handleCopy = async (token: ApiToken, action: "token" | "config") => {
+    if (!token.token) {
       return;
     }
 
-    setCopiedTokenId(token.id);
+    const value = action === "token" ? token.token : buildMcpRemoteConfig(token.token);
+    if (!(await copyTextToClipboard(value))) {
+      return;
+    }
+
+    setCopiedAction({ tokenId: token.id, action });
     window.setTimeout(() => {
-      setCopiedTokenId((current) => (current === token.id ? null : current));
+      setCopiedAction((current) => (current?.tokenId === token.id && current.action === action ? null : current));
     }, 1600);
   };
 
@@ -372,7 +393,7 @@ const TokenList = ({ tokens, isLoading, isRevoking, onRevoke }: TokenListProps) 
         <div
           key={token.id}
           className={cn(
-            "flex min-h-16 items-center gap-3 rounded-lg border p-3 transition-colors sm:p-4",
+            "flex min-h-16 flex-col items-stretch gap-3 rounded-lg border p-3 transition-colors sm:p-4 lg:flex-row lg:items-center",
             token.isRevoked ? "border-slate-100 bg-slate-50/50 opacity-60" : "border-slate-200 bg-white hover:border-slate-300"
           )}
         >
@@ -389,28 +410,51 @@ const TokenList = ({ tokens, isLoading, isRevoking, onRevoke }: TokenListProps) 
               {!token.token ? " · 旧 Token 无法找回明文，请重新生成" : ""}
             </span>
           </span>
-          <Button
-            size="icon"
-            variant="outline"
-            className="h-9 w-9 shrink-0 bg-white"
-            title={token.token ? "复制 Token" : "旧 Token 无法复制"}
-            aria-label={token.token ? "复制 Token" : "旧 Token 无法复制"}
-            disabled={token.isRevoked || !token.token}
-            onClick={() => void handleCopy(token)}
-          >
-            {copiedTokenId === token.id ? <ShieldCheck className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-          </Button>
-          <Button
-            size="icon"
-            variant="danger"
-            className="h-9 w-9 shrink-0"
-            title="撤销 Token"
-            aria-label="撤销 Token"
-            disabled={token.isRevoked || isRevoking}
-            onClick={() => onRevoke(token)}
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          <div className="flex shrink-0 flex-col gap-2 sm:flex-row lg:items-center">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 justify-center whitespace-nowrap bg-white px-3 text-xs"
+              title={token.token ? "复制 Token" : "旧 Token 无法复制"}
+              aria-label={token.token ? "复制 Token" : "旧 Token 无法复制"}
+              disabled={token.isRevoked || !token.token}
+              onClick={() => void handleCopy(token, "token")}
+            >
+              {copiedAction?.tokenId === token.id && copiedAction.action === "token" ? (
+                <ShieldCheck className="h-3.5 w-3.5" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+              {copiedAction?.tokenId === token.id && copiedAction.action === "token" ? "已复制" : "复制 Token"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 justify-center whitespace-nowrap bg-white px-3 text-xs"
+              title={token.token ? "复制完整 MCP 配置" : "旧 Token 无法复制 MCP 配置"}
+              aria-label={token.token ? "复制完整 MCP 配置" : "旧 Token 无法复制 MCP 配置"}
+              disabled={token.isRevoked || !token.token}
+              onClick={() => void handleCopy(token, "config")}
+            >
+              {copiedAction?.tokenId === token.id && copiedAction.action === "config" ? (
+                <ShieldCheck className="h-3.5 w-3.5" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+              {copiedAction?.tokenId === token.id && copiedAction.action === "config" ? "已复制" : "复制完整 MCP 配置"}
+            </Button>
+            <Button
+              size="icon"
+              variant="danger"
+              className="h-9 w-full shrink-0 sm:w-9"
+              title="撤销 Token"
+              aria-label="撤销 Token"
+              disabled={token.isRevoked || isRevoking}
+              onClick={() => onRevoke(token)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       ))}
     </div>
