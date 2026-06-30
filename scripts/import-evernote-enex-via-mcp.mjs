@@ -388,10 +388,14 @@ function assertImportedMemoTimestamps(memo, note) {
 }
 
 function enexContentToMarkdown(content) {
-  const body = content
+  let body = content
     .replace(/<\?xml[\s\S]*?\?>/i, "")
     .replace(/<!DOCTYPE[\s\S]*?>/i, "")
     .trim();
+
+  // Prevent Turndown from stripping empty en-media elements
+  body = body.replace(/<en-media([^>]*?)(?:\/>|>\s*<\/en-media>)/g, '<en-media$1>_</en-media>');
+
   const turndown = new TurndownService({
     headingStyle: "atx",
     bulletListMarker: "-",
