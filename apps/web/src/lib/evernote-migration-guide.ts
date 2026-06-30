@@ -50,8 +50,9 @@ export const EVERNOTE_MIGRATION_GUIDE = {
           language: "sh",
           code: `你是 AI 编程助手。请帮我基于 \`evernote-backup\` 工具和刚安装的 EdgeEver MCP 服务，把我的本地印象笔记数据同步迁移到实例中：
 1. 检查本地是否安装了 \`evernote-backup\`。若未安装，请使用 \`pipx install evernote-backup\` 自动安装。
-2. 提示我输入印象笔记用户名密码并初始化数据库（指定 china 后端），随后同步数据并导出到 \`./evernote-export\` 目录。
-3. 在 EdgeEver 项目根目录下运行内置的导入脚本完成迁移：
+2. 确保项目根目录下已安装本地图片压缩库 \`sharp\`（未安装请运行 \`bun install\`）。
+3. 提示我输入印象笔记用户名密码并初始化数据库（指定 china 后端），随后同步数据并导出到 \`./evernote-export\` 目录。
+4. 运行内置的导入脚本完成迁移。脚本会自动利用本地 \`sharp\` 库将图片进行 2560px 等比压缩并转为 WebP 格式再上传，以此避免触发 Cloudflare 限额：
    - 全量迁移运行：\`bun scripts/import-evernote-enex-via-mcp.mjs --input "./evernote-export" --yes\`
    - 若要指定只迁移某几个笔记本，请在命令后加上 \`--include "笔记本A,笔记本B"\` 参数。
 
