@@ -37,9 +37,9 @@ const copy = isEnglish
         "cp .env.local.example .env.local\nbun install\nbunx wrangler d1 create edgeever\nbunx wrangler r2 bucket create edgeever-resources\nbun run auth:hash -- <your password>\nbun run deploy",
     }
   : {
-      manual: "手动安装",
-      agent: "通过 AI Agent 安装",
-      agentIntro: "将下方提示词复制给你的 AI 助手（Claude Code、Codex、Cursor、Trae 等），它会自动完成安装。",
+      manual: "手动部署",
+      agent: "通过 AI Agent 部署",
+      agentIntro: "将下方提示词复制给你的 AI 助手（Claude Code、Codex、Cursor、Trae 等），它会自动完成部署。",
       promptLabel: "提示词",
       copyPrompt: "复制提示词",
       copying: "复制中...",
@@ -47,7 +47,7 @@ const copy = isEnglish
       copyFailed: "复制失败",
       billingNotice:
         "提示：Cloudflare 的 R2、D1 和 Worker 即使使用免费额度，开通或使用时也可能要求绑定 Visa 卡。国内用户可考虑使用招商银行多币种卡绑定。",
-      manualIntro: "手动安装适合熟悉 Cloudflare 与命令行的用户。先 Fork 仓库，再从你自己的 Fork 仓库部署。",
+      manualIntro: "手动部署适合熟悉 Cloudflare 与命令行的用户。先 Fork 仓库，再从你自己的 Fork 仓库部署。",
       step1: "第一步",
       step1Title: "Fork 官方仓库",
       step2: "第二步",
@@ -57,7 +57,7 @@ const copy = isEnglish
       manualCloudflare: "手动创建 Cloudflare 资源",
       manualHint: "把 D1 创建命令返回的 database_id 和密码 hash 填入本机 .env.local。",
       promptText:
-        "请先 Fork EdgeEver 仓库：https://github.com/tianma-if/edgeever\n\nFork 完成后，请使用 Fork 后的仓库把 EdgeEver 安装部署到 Cloudflare 上，并为 Fork 仓库配置自动同步上游，以便后续获取最新产品特性。",
+        "请先 Fork EdgeEver 仓库：https://github.com/tianma-if/edgeever\n\nFork 完成后，请使用 Fork 后的仓库把 EdgeEver 部署到 Cloudflare 上，并为 Fork 仓库配置自动同步上游，以便后续获取最新产品特性。",
       forkUrl: "https://github.com/tianma-if/edgeever",
       cloneCommand: "git clone <你的 Fork 仓库 URL>\ncd edgeever",
       deployCommand:

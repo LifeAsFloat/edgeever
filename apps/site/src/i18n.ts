@@ -33,7 +33,7 @@ export const siteCopy = {
       homeAria: "EdgeEver 首页",
       features: "功能特性",
       guides: "使用指南",
-      deploy: "安装部署",
+      deploy: "部署",
       migration: "从印象笔记迁移",
       advancedPlay: "搭配AI Agent的玩法",
       blog: "博客",
@@ -45,7 +45,7 @@ export const siteCopy = {
     hero: {
       slogan: "基于 Cloudflare 全家桶自托管的免费开源『印象笔记』",
       demo: "在线演示",
-      agentInstall: "通过AI Agent安装",
+      agentInstall: "通过AI Agent部署",
       imageAlt: "EdgeEver product preview",
     },
     features: {
@@ -100,7 +100,7 @@ export const siteCopy = {
     },
     guides: {
       eyebrow: "EdgeEver Guides",
-      heading: "从安装、迁移到 AI Agent 玩法",
+      heading: "从部署、迁移到 AI Agent 玩法",
       description: "把最关键的上手路径放到显眼位置：先部署自己的实例，再把旧笔记迁过来，最后用 MCP 接入 AI Agent 整理长期知识库。",
       items: [
         {
