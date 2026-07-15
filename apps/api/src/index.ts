@@ -564,7 +564,6 @@ app.post("/api/v1/users", zValidator("json", UserCreateSchema), async (c) => {
   c.set("auth", auth);
   const denied = requireOwner(c);
   if (denied) return denied;
-  if (isDemoMode(c.env)) return forbidden(c, "The demo environment does not allow managing users.");
 
   const input = c.req.valid("json");
   const existing = await c.env.DB.prepare(`SELECT id FROM users WHERE username = ?`).bind(input.username).first();
@@ -602,7 +601,6 @@ app.patch("/api/v1/users/:id", zValidator("json", UserUpdateSchema), async (c) =
   c.set("auth", auth);
   const denied = requireOwner(c);
   if (denied) return denied;
-  if (isDemoMode(c.env)) return forbidden(c, "The demo environment does not allow managing users.");
 
   const userId = c.req.param("id");
   const input = c.req.valid("json");

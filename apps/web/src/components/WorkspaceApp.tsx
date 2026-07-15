@@ -2574,7 +2574,7 @@ export const WorkspaceApp = ({
                     isLoggingOut={isLoggingOut}
                     authRequired={authRequired}
                     demoMode={demoMode}
-                    isOwner={!demoMode && authRequired && user?.role === "owner"}
+                    isOwner={authRequired && user?.role === "owner"}
                     onShowGuide={() => setRightView("evernote-migration")}
                   />
                 ) : rightView === "assets" ? (
