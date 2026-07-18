@@ -22,10 +22,12 @@ type Section = "password" | "users";
 
 export const AccountSecurityModal = ({
   currentUser,
+  initialSection = "password",
   onClose,
   visible,
 }: {
   currentUser: AuthUser | null;
+  initialSection?: Section;
   onClose: () => void;
   visible: boolean;
 }) => {
@@ -90,13 +92,15 @@ export const AccountSecurityModal = ({
   });
 
   useEffect(() => {
-    if (!visible) {
+    if (visible) {
+      setSection(initialSection);
+    } else {
       setSection("password");
       passwordMutation.reset();
       createUserMutation.reset();
       updateUserMutation.reset();
     }
-  }, [visible]);
+  }, [initialSection, visible]);
 
   const errorMessage = (error: unknown) => {
     if (error instanceof ApiRequestError && error.code === "invalid_current_password") return "当前密码不正确";
