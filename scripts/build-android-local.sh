@@ -7,8 +7,8 @@ MOBILE_DIR="$PROJECT_ROOT/apps/mobile"
 ANDROID_DIR="$MOBILE_DIR/android"
 MODE="${1:-fast}"
 
-if [[ "$MODE" != "fast" && "$MODE" != "play" ]]; then
-  echo "用法: $0 [fast|play]" >&2
+if [[ "$MODE" != "fast" && "$MODE" != "apk" && "$MODE" != "play" ]]; then
+  echo "用法: $0 [fast|apk|play]" >&2
   exit 2
 fi
 
@@ -85,6 +85,29 @@ fi
 
 PLAY_ARCHS="${EDGE_EVER_ANDROID_ARCHS:-armeabi-v7a,arm64-v8a,x86,x86_64}"
 KEYSTORE_FILE="$(cd "$(dirname "$ANDROID_KEYSTORE_FILE")" && pwd)/$(basename "$ANDROID_KEYSTORE_FILE")"
+
+if [[ "$MODE" == "apk" ]]; then
+  echo "构建生产签名 APK（${PLAY_ARCHS}）..."
+  ./gradlew assembleRelease \
+    "${COMMON_ARGS[@]}" \
+    -PreactNativeArchitectures="$PLAY_ARCHS" \
+    -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" \
+    -Pandroid.injected.signing.store.password="$ANDROID_KEYSTORE_PASSWORD" \
+    -Pandroid.injected.signing.key.alias="$ANDROID_KEY_ALIAS" \
+    -Pandroid.injected.signing.key.password="$ANDROID_KEY_PASSWORD" \
+    -Pandroid.injected.signing.store.type=PKCS12
+  APK_PATH="$ANDROID_DIR/app/build/outputs/apk/release/app-release.apk"
+  APKSIGNER_PATH="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+  AAPT2_PATH="$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt2"
+  test -s "$APK_PATH"
+  test -x "$APKSIGNER_PATH"
+  test -x "$AAPT2_PATH"
+  "$APKSIGNER_PATH" verify --verbose "$APK_PATH"
+  "$AAPT2_PATH" dump badging "$APK_PATH" | sed -n '1p'
+  shasum -a 256 "$APK_PATH"
+  echo "完成: $APK_PATH"
+  exit 0
+fi
 
 echo "构建 Play 签名 AAB（${PLAY_ARCHS}）..."
 ./gradlew bundleRelease \
