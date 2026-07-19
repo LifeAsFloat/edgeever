@@ -46,6 +46,7 @@ The public demo resets every Monday at 1:00 AM (China Standard Time) and restore
 - Offline drafts and local sync queue for existing notes.
 - Multi-user instances with isolated personal workspaces, owner-managed accounts, and PBKDF2-SHA256 password hashing.
 - Chrome/Edge web clipper is complete and currently under store review.
+- Support installing as a PWA app for a native-like experience on PC and mobile; the native mobile App (iOS / Android) is complete and under store review, with the Android APK available on the GitHub Releases page for immediate download.
 
 ## Deployment
 
