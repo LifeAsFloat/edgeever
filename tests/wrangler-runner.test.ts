@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import {
   buildWranglerInvocation,
   buildWranglerEnvironment,
@@ -21,7 +21,7 @@ describe("cross-platform Wrangler runner", () => {
 
     expect(invocation.executable).toBe(process.execPath);
     expect(invocation.args).toEqual([resolveWranglerCliPath(process.cwd()), "--version"]);
-    expect(invocation.args[0]).toEndWith("node_modules/wrangler/bin/wrangler.js");
+    expect(invocation.args[0]).toEndWith(["node_modules", "wrangler", "bin", "wrangler.js"].join(sep));
     expect(invocation.args[0]).not.toEndWith("wrangler.cmd");
   });
 
