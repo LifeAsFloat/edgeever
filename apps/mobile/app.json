@@ -3,7 +3,7 @@
     "name": "EdgeEver",
     "slug": "edgeever",
     "scheme": "edgeever",
-    "version": "0.5.0",
+    "version": "1.5.1",
     "runtimeVersion": {
       "policy": "appVersion"
     },
@@ -21,11 +21,14 @@
     "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "org.edgeever.mobile",
-      "supportsTablet": true
+      "supportsTablet": false,
+      "config": {
+        "usesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "org.edgeever.mobile",
-      "versionCode": 24,
+      "versionCode": 34,
       "adaptiveIcon": {
         "backgroundColor": "#d1fae5",
         "backgroundImage": "./assets/icon.png",

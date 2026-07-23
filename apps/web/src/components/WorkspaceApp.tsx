@@ -55,13 +55,14 @@ import type {
   MemoSortMode,
 } from "@/lib/app-helpers";
 import {
-  DEFAULT_MEMO_TITLE,
   MIN_MEMO_LIST_WIDTH_PX,
   MAX_MEMO_LIST_WIDTH_PX,
   DEFAULT_MEMO_LIST_WIDTH_PX,
   isTextEntryTarget,
   readImageCompressionPreference,
   writeImageCompressionPreference,
+  readDesktopFocusModePreference,
+  writeDesktopFocusModePreference,
   readShortcutSettingsPreference,
   writeShortcutSettingsPreference,
   getShortcutActionForEvent,
@@ -372,7 +373,7 @@ const MobileNotebookPicker = ({
   onSelectAll: () => void;
   onSelect: (notebookId: string) => void;
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const listRef = useRef<HTMLDivElement | null>(null);
   const [notebookSearch, setNotebookSearch] = useState("");
   const tree = useMemo(() => buildNotebookTree(notebooks), [notebooks]);
@@ -639,7 +640,7 @@ export const WorkspaceApp = ({
   isLoggingOut: boolean;
   onLogout: () => void;
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const location = useLocation();
   const navigate = useNavigate();
@@ -649,6 +650,7 @@ export const WorkspaceApp = ({
   const [activePane, setActivePane] = useState<Pane>(() => (isInitialSettingsRoute && !isInitialMobileEditorReturn ? "editor" : "memos"));
   const [memoView, setMemoView] = useState<MemoView>(() => (isTrashRoute ? "trash" : "notebook"));
   const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(null);
+  const autoSelectedDemoNotebookRef = useRef(false);
   const [selectedMemoId, setSelectedMemoId] = useState<string | null>(null);
   const [createdMemoEditId, setCreatedMemoEditId] = useState<string | null>(null);
   const [selectedMemoIds, setSelectedMemoIds] = useState<Set<string>>(new Set());
@@ -659,8 +661,35 @@ export const WorkspaceApp = ({
   const [notebookNameDialog, setNotebookNameDialog] = useState<NotebookNameDialogState | null>(null);
   const [notebookDeleteConfirmation, setNotebookDeleteConfirmation] = useState<Notebook | null>(null);
   const [appNoticeDialog, setAppNoticeDialog] = useState<AppNoticeDialogState | null>(null);
+  const [demoResetConfirmationOpen, setDemoResetConfirmationOpen] = useState(false);
+
+  const resetDemoMutation = useMutation({
+    mutationFn: () => api.resetDemo(),
+    onSuccess: () => {
+      setDemoResetConfirmationOpen(false);
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["memos"] }),
+        queryClient.invalidateQueries({ queryKey: ["memo"] }),
+        queryClient.invalidateQueries({ queryKey: ["notebooks"] }),
+        queryClient.invalidateQueries({ queryKey: ["resources"] }),
+        queryClient.invalidateQueries({ queryKey: ["tags"] }),
+      ]);
+      setAppNoticeDialog({
+        title: t("demo.resetSuccess"),
+        description: t("demo.resetSuccess"),
+      });
+    },
+    onError: () => {
+      setDemoResetConfirmationOpen(false);
+      setAppNoticeDialog({
+        title: t("demo.resetFailed"),
+        description: t("demo.resetFailed"),
+      });
+    },
+  });
   const [multiSelectKeyDown, setMultiSelectKeyDown] = useState(false);
   const [imageCompressionEnabled, setImageCompressionEnabled] = useState(readImageCompressionPreference);
+  const [desktopFocusMode, setDesktopFocusMode] = useState(readDesktopFocusModePreference);
   const [shortcutSettings, setShortcutSettings] = useState<ShortcutSettings>(readShortcutSettingsPreference);
   const [rightView, setRightView] = useState<"editor" | "settings" | "assets" | "tags" | "evernote-migration">(() =>
     isInitialSettingsRoute ? "settings" : "editor"
@@ -788,6 +817,20 @@ export const WorkspaceApp = ({
   });
 
   const notebooks = notebooksQuery.data?.notebooks ?? [];
+  useEffect(() => {
+    const english = i18n.resolvedLanguage === "en-US";
+    const preferredNotebookId = english ? "nb_demo_features_en" : "nb_demo_features";
+
+    if (!notebooks.some((notebook) => notebook.id === preferredNotebookId)) {
+      return;
+    }
+
+    if (!autoSelectedDemoNotebookRef.current && selectedNotebookId === null) {
+      autoSelectedDemoNotebookRef.current = true;
+      setSelectedNotebookId(preferredNotebookId);
+    }
+  }, [i18n.resolvedLanguage, notebooks, selectedNotebookId]);
+
   const mobileEditorReturnMemoId = getMobileEditorReturnMemoId(location.search);
   const visibleActivePane: Pane = mobileEditorReturnMemoId ? "memos" : activePane;
   const defaultMemoNotebookId =
@@ -1546,6 +1589,9 @@ export const WorkspaceApp = ({
     ? queryClient.getQueryData<{ memo: MemoDetail }>(memoDetailQueryKey(selectedMemoId, memoView))?.memo ?? null
     : null;
   const selectedMemo = memoQuery.data?.memo ?? cachedSelectedMemo;
+  const desktopFocusModeActive = Boolean(
+    isDesktop && desktopFocusMode && rightView === "editor" && selectedMemo && !memoSelectionModeActive
+  );
   const selectionMoveNotebookOptions = useMemo(() => getNotebookMoveOptions(notebooks), [notebooks]);
   const selectedMemosInCurrentList = useMemo(
     () => memos.filter((memo) => selectedMemoIds.has(memo.id)),
@@ -1620,7 +1666,7 @@ export const WorkspaceApp = ({
     setMobileBottomNavActive("home");
     createMemoMutation.mutate({
       notebookId: defaultMemoNotebookId,
-      title: template?.title ?? DEFAULT_MEMO_TITLE,
+      title: template?.title ?? "",
       contentMarkdown: template?.contentMarkdown ?? "",
       tags: template?.tags ?? [],
     });
@@ -1973,6 +2019,15 @@ export const WorkspaceApp = ({
     }
   };
 
+  const updateDesktopFocusMode = useCallback((enabled: boolean) => {
+    setDesktopFocusMode(enabled);
+    writeDesktopFocusModePreference(enabled);
+  }, []);
+
+  const toggleDesktopFocusMode = useCallback(() => {
+    updateDesktopFocusMode(!desktopFocusModeActive);
+  }, [desktopFocusModeActive, updateDesktopFocusMode]);
+
   const handleWorkspaceBackRequest = useCallback(() => {
     if (appNoticeDialog) {
       setAppNoticeDialog(null);
@@ -2037,6 +2092,11 @@ export const WorkspaceApp = ({
       return true;
     }
 
+    if (desktopFocusModeActive) {
+      updateDesktopFocusMode(false);
+      return true;
+    }
+
     if (rightView === "settings") {
       handleCloseSettings();
       return true;
@@ -2066,6 +2126,7 @@ export const WorkspaceApp = ({
     return false;
   }, [
     visibleActivePane,
+    desktopFocusModeActive,
     appNoticeDialog,
     rightView,
     clearMemoSelection,
@@ -2090,6 +2151,7 @@ export const WorkspaceApp = ({
     notebookNameDialog,
     templatesOpen,
     updateNotebookMutation.isPending,
+    updateDesktopFocusMode,
   ]);
 
   useBrowserBackLayer(workspaceBackTargetActive, handleWorkspaceBackRequest);
@@ -2324,16 +2386,22 @@ export const WorkspaceApp = ({
         <main
           className={cn(
             "grid h-[100dvh] min-h-0 grid-cols-[minmax(0,1fr)]",
-            rightView === "editor"
-              ? "lg:grid-cols-[260px_var(--memo-list-width)_minmax(0,1fr)]"
-              : "lg:grid-cols-[260px_1fr]"
+            desktopFocusModeActive
+              ? "lg:grid-cols-[minmax(0,1fr)]"
+              : rightView === "editor"
+                ? "lg:grid-cols-[260px_var(--memo-list-width)_minmax(0,1fr)]"
+                : "lg:grid-cols-[260px_1fr]"
           )}
           style={{ "--memo-list-width": `${memoListWidth}px` } as CSSProperties}
         >
           <aside
             className={cn(
-              "min-h-0 border-r border-slate-200 bg-white/75 backdrop-blur-lg lg:block",
-              visibleActivePane === "notebooks" ? "block" : "hidden"
+              "min-h-0 border-r border-slate-200 bg-white/75 backdrop-blur-lg",
+              desktopFocusModeActive
+                ? "hidden"
+                : visibleActivePane === "notebooks"
+                  ? "block lg:block"
+                  : "hidden lg:block"
             )}
           >
             {(isDesktop || visibleActivePane === "notebooks") && (
@@ -2381,6 +2449,9 @@ export const WorkspaceApp = ({
                     setActivePane("memos");
                   }}
                   onEmptyTrash={handleEmptyTrash}
+                  demoMode={demoMode}
+                  onResetDemo={() => setDemoResetConfirmationOpen(true)}
+                  isResettingDemo={resetDemoMutation.isPending}
                 />
               </Suspense>
             )}
@@ -2389,9 +2460,11 @@ export const WorkspaceApp = ({
           <section
             className={cn(
               "relative min-w-0 overflow-hidden border-r border-slate-200 bg-slate-50",
-              rightView === "editor"
-                ? (visibleActivePane === "memos" ? "block lg:block lg:bg-white/75 lg:backdrop-blur-lg" : "hidden lg:block lg:bg-white/75 lg:backdrop-blur-lg")
-                : (visibleActivePane === "memos" ? "block lg:hidden" : "hidden lg:hidden")
+              desktopFocusModeActive
+                ? "hidden"
+                : rightView === "editor"
+                  ? (visibleActivePane === "memos" ? "block lg:block lg:bg-white/75 lg:backdrop-blur-lg" : "hidden lg:block lg:bg-white/75 lg:backdrop-blur-lg")
+                  : (visibleActivePane === "memos" ? "block lg:hidden" : "hidden lg:hidden")
             )}
           >
             <MemoListPane
@@ -2534,10 +2607,13 @@ export const WorkspaceApp = ({
                 ) : (
                   <EditorPane
                     memo={selectedMemo}
+                    desktopFocusMode={desktopFocusModeActive}
+                    onToggleDesktopFocusMode={toggleDesktopFocusMode}
                     mobileDefaultEditMemoId={createdMemoEditId}
                     isTrashView={memoView === "trash"}
                     notebooks={notebooks}
                     isLoading={memoQuery.isLoading}
+                    contentSearchQuery={search}
                     searchFocusToken={noteSearchFocusToken}
                     replaceFocusToken={noteReplaceFocusToken}
                     imageCompressionEnabled={imageCompressionEnabled}
@@ -2670,6 +2746,18 @@ export const WorkspaceApp = ({
           tone="neutral"
           onCancel={() => setAppNoticeDialog(null)}
           onConfirm={() => setAppNoticeDialog(null)}
+        />
+      )}
+      {demoResetConfirmationOpen && (
+        <AppConfirmDialog
+          title={t("demo.resetTitle")}
+          description={t("demo.resetDescription")}
+          confirmLabel={t("demo.resetConfirm")}
+          cancelLabel={t("common.cancel")}
+          isWorking={resetDemoMutation.isPending}
+          tone="primary"
+          onCancel={() => setDemoResetConfirmationOpen(false)}
+          onConfirm={() => resetDemoMutation.mutate()}
         />
       )}
       {visibleActivePane !== "editor" && !memoSelectionModeActive && (

@@ -145,6 +145,7 @@ export { buildNotebookTree, type NotebookNode };
 export { DEFAULT_MEMO_TITLE };
 
 export const IMAGE_COMPRESSION_STORAGE_KEY = "edgeever.imageCompressionEnabled";
+export const DESKTOP_FOCUS_MODE_STORAGE_KEY = "edgeever.desktopFocusMode";
 export const MEMO_LIST_DENSITY_STORAGE_KEY = "edgeever.memoListDensity";
 export const MEMO_LIST_WIDTH_STORAGE_KEY = "edgeever.memoListWidth";
 export const NOTEBOOK_SORT_STORAGE_KEY = "edgeever.notebookSort";
@@ -209,7 +210,16 @@ export const DEFAULT_SHORTCUT_SETTINGS: ShortcutSettings = {
   focusReplace: { key: "h", ctrlOrMeta: true, shift: false, alt: false },
 };
 
+const SHORTCUT_ALIASES: Partial<Record<ShortcutAction, ShortcutBinding[]>> = {
+  focusReplace: [{ key: "h", ctrlOrMeta: true, shift: true, alt: false }],
+};
+
 const SHORTCUT_ACTION_VALUES: ShortcutAction[] = ["createMemo", "createNotebook", "focusSearch", "focusReplace"];
+
+export const isDefaultMemoTitle = (title: string | null | undefined) => title?.trim() === DEFAULT_MEMO_TITLE;
+
+export const getEditableMemoTitle = (title: string | null | undefined) =>
+  isDefaultMemoTitle(title) ? "" : title?.trim() || "";
 
 export const getMemoTitle = (title: string | null | undefined) => title?.trim() || DEFAULT_MEMO_TITLE;
 
@@ -245,6 +255,22 @@ export const readImageCompressionPreference = () => {
 export const writeImageCompressionPreference = (enabled: boolean) => {
   try {
     window.localStorage.setItem(IMAGE_COMPRESSION_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
+export const readDesktopFocusModePreference = () => {
+  try {
+    return window.localStorage.getItem(DESKTOP_FOCUS_MODE_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+};
+
+export const writeDesktopFocusModePreference = (enabled: boolean) => {
+  try {
+    window.localStorage.setItem(DESKTOP_FOCUS_MODE_STORAGE_KEY, enabled ? "true" : "false");
   } catch {
     // Local storage can be unavailable in private or restricted browser contexts.
   }
@@ -398,7 +424,10 @@ export const getShortcutActionForEvent = (event: KeyboardEvent, settings: Shortc
     return null;
   }
 
-  return SHORTCUT_ACTION_VALUES.find((action) => shortcutBindingsEqual(settings[action], eventBinding)) ?? null;
+  return SHORTCUT_ACTION_VALUES.find((action) =>
+    shortcutBindingsEqual(settings[action], eventBinding) ||
+    (SHORTCUT_ALIASES[action] ?? []).some((binding) => shortcutBindingsEqual(binding, eventBinding))
+  ) ?? null;
 };
 
 export const compareDateDesc = (first: string, second: string) => {

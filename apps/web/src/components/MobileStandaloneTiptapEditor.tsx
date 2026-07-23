@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Image from "@tiptap/extension-image";
 import Placeholder from "@tiptap/extension-placeholder";
+import { TableKit } from "@tiptap/extension-table";
 import { createExcerpt, docToMarkdown, docToText, emptyDoc, type MemoDetail, type MemoEditSession, type Notebook, type TiptapDoc } from "@edgeever/shared";
-import { getMobileEditorInputAttributes, getMobileEditorPlaceholder } from "@edgeever/shared/mobile-editor";
+import { getMobileEditorInputAttributes, getMobileEditorPlaceholder, type MobileEditorTableActionId } from "@edgeever/shared/mobile-editor";
 import {
   MobileEditorFallback,
   MobileEditorHeader,
@@ -12,7 +14,8 @@ import {
   MobileEditorNotebookSheet,
   MobileEditorToolbar,
 } from "@/components/MobileStandaloneEditorParts";
-import { getNotebookMoveOptions } from "@/lib/app-helpers";
+import { getEditableMemoTitle, getNotebookMoveOptions } from "@/lib/app-helpers";
+import { defaultLocale, normalizeLocale } from "@/i18n/locales";
 import { compressImageForUpload } from "@/lib/image-compression";
 import { localDb, type LocalDraft } from "@/lib/local-db";
 import {
@@ -21,13 +24,11 @@ import {
   writeMobileEditorReturnPreview,
 } from "@/lib/mobile-editor";
 import {
-  DEFAULT_MOBILE_EDITOR_MEMO_TITLE,
   MOBILE_EDITOR_AUTO_SAVE_DELAY_MS,
   MOBILE_EDITOR_INITIAL_FOCUS_DELAY_MS,
   MOBILE_EDITOR_LEAVE_SAVE_TIMEOUT_MS,
   getMobileEditorDraftKey,
   getMobileEditorParams,
-  getMobileEditorSaveLabel,
   getMobileEditorStatusClassName,
   normalizeMobileEditorDoc,
   parseMobileEditorTags,
@@ -38,6 +39,7 @@ import {
   type MobileEditorSaveState,
 } from "@/lib/mobile-editor-standalone";
 import { getMemoUpdateQueueId, isMemoUpdateAlreadyApplied, queueMemoUpdate, shouldQueueMemoSaveError } from "@/lib/sync-queue";
+import { EdgeEverCodeBlock, codeBlockLowlight } from "@/lib/code-block";
 
 type ListNotebooksResponse = {
   notebooks: Notebook[];
@@ -53,7 +55,9 @@ export const MobileStandaloneTiptapEditor = ({
   onLeave,
 }: MobileStandaloneTiptapEditorProps = {}) => {
   const params = useMemo(() => getMobileEditorParams(), []);
+  const { t, i18n } = useTranslation();
   const memoId = memoIdProp ?? params.get("memoId");
+  const locale = normalizeLocale(i18n.resolvedLanguage ?? i18n.language) ?? defaultLocale;
   const draftKey = getMobileEditorDraftKey(memoId);
   const [memo, setMemo] = useState<MemoDetail | null>(null);
   const memoRef = useRef<MemoDetail | null>(null);
@@ -166,13 +170,17 @@ export const MobileStandaloneTiptapEditor = ({
 
   const editor = useEditor({
     extensions: [
-      StarterKit,
+      StarterKit.configure({ codeBlock: false }),
+      EdgeEverCodeBlock.configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
       Image.configure({
         allowBase64: false,
         inline: false,
       }),
+      TableKit.configure({
+        table: { renderWrapper: true },
+      }),
       Placeholder.configure({
-        placeholder: getMobileEditorPlaceholder("zh-CN"),
+        placeholder: getMobileEditorPlaceholder(locale),
       }),
     ],
     content: emptyDoc(),
@@ -246,7 +254,7 @@ export const MobileStandaloneTiptapEditor = ({
   const buildSavePayload = useCallback((currentMemo: MemoDetail) => {
     const editSession = editSessionRef.current;
     if (!editSession || editSession.memoId !== currentMemo.id) {
-      throw new Error("编辑会话尚未就绪");
+      throw new Error(t("editor.saveState.error"));
     }
 
     return {
@@ -417,7 +425,7 @@ export const MobileStandaloneTiptapEditor = ({
           return true;
         }
 
-        setError(saveError instanceof Error ? saveError.message : "保存失败，已保留本地草稿");
+        setError(saveError instanceof Error ? saveError.message : t("editor.saveState.error"));
         setSaveStateStable("error");
         return false;
       } finally {
@@ -549,7 +557,7 @@ export const MobileStandaloneTiptapEditor = ({
         }
       }, 1200);
     } catch (notebookError) {
-      setError(notebookError instanceof Error ? notebookError.message : "切换笔记本失败");
+      setError(notebookError instanceof Error ? notebookError.message : t("editor.saveState.error"));
       setSaveStateStable("error");
     } finally {
       setNotebookUpdatePending(false);
@@ -557,30 +565,48 @@ export const MobileStandaloneTiptapEditor = ({
     }
   };
 
-  const handleImageUpload = async (file?: File | null) => {
+  const handleResourceUpload = async (file?: File | null) => {
     const currentMemo = memoRef.current;
     if (!currentMemo || !editor || !file) {
       return;
     }
 
     setError(null);
-    setSaveStateStable("compressing");
-
     try {
-      const uploadFile = (await compressImageForUpload(file)).file;
+      const isImage = file.type.startsWith("image/");
+      setSaveStateStable(isImage ? "compressing" : "uploading");
+      const uploadFile = isImage ? (await compressImageForUpload(file)).file : file;
       setSaveStateStable("uploading");
       const { resource } = await uploadMobileEditorResource(currentMemo.id, uploadFile);
-      editor
-        .chain()
-        .focus()
-        .setImage({
-          src: resource.url,
-          alt: file.name,
-          title: file.name,
-        })
-        .run();
+      if (resource.kind === "image") {
+        editor
+          .chain()
+          .focus()
+          .setImage({
+            src: resource.url,
+            alt: file.name,
+            title: file.name,
+          })
+          .run();
+      } else {
+        editor
+          .chain()
+          .focus()
+          .insertContent({
+            type: "paragraph",
+            content: [{
+              type: "text",
+              text: `附件：${resource.filename || file.name}`,
+              marks: [{
+                type: "link",
+                attrs: { href: resource.url, target: "_blank", class: "edgeever-attachment-link" },
+              }],
+            }],
+          })
+          .run();
+      }
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "图片上传失败");
+      setError(uploadError instanceof Error ? uploadError.message : t("editor.uploadState.fileFailed"));
       setSaveStateStable("error");
     }
   };
@@ -633,7 +659,7 @@ export const MobileStandaloneTiptapEditor = ({
   useEffect(() => {
     if (!memoId || !editor) {
       if (!memoId) {
-        setError("缺少 memoId");
+        setError(t("editor.saveState.error"));
         setSaveStateStable("error");
       }
       return;
@@ -656,7 +682,7 @@ export const MobileStandaloneTiptapEditor = ({
 
         editSessionRef.current = sessionData.editSession;
 
-        const nextTitle = data.memo.title || "";
+        const nextTitle = getEditableMemoTitle(data.memo.title);
         const nextTagsText = Array.isArray(data.memo.tags) ? data.memo.tags.join(", ") : "";
         const nextContentJson = normalizeMobileEditorDoc(data.memo);
         let draft = await readBestLocalDraft();
@@ -707,7 +733,7 @@ export const MobileStandaloneTiptapEditor = ({
         if (cancelled) {
           return;
         }
-        setError(loadError instanceof Error ? loadError.message : "加载失败");
+        setError(loadError instanceof Error ? loadError.message : t("editor.loading"));
         setSaveStateStable("error");
       }
     })();
@@ -719,7 +745,7 @@ export const MobileStandaloneTiptapEditor = ({
         initialFocusTimerRef.current = null;
       }
     };
-  }, [editor, focusEditorAfterLoad, memoId, readBestLocalDraft, scheduleMetadataSave, setSaveStateStable]);
+  }, [editor, focusEditorAfterLoad, memoId, readBestLocalDraft, scheduleMetadataSave, setSaveStateStable, t]);
 
   useEffect(() => {
     const handlePageHide = () => {
@@ -784,14 +810,35 @@ export const MobileStandaloneTiptapEditor = ({
     };
   }, [currentSnapshot, draftKey, memoId, persistLocalDraft, persistReturnPreview, reconcileBackgroundSave, saveNow, sendBackgroundSave, setSaveStateStable]);
 
-  const saveLabel = getMobileEditorSaveLabel(saveState);
+  const saveLabel =
+    saveState === "loading"
+      ? t("editor.loading")
+      : saveState === "saving"
+        ? t("editor.saveState.saving")
+        : saveState === "compressing"
+          ? t("editor.uploadState.compressing")
+          : saveState === "uploading"
+            ? t("editor.uploadState.uploading")
+            : saveState === "dirty"
+              ? t("editor.saveState.unsaved")
+              : saveState === "saved"
+                ? t("editor.saveState.saved")
+                : saveState === "local-draft"
+                  ? t("editor.saveState.unsaved")
+                  : saveState === "leaving"
+                    ? t("editor.backToList")
+                    : saveState === "error"
+                      ? t("editor.saveState.error")
+                      : t("editor.saveState.saved");
   const statusClassName = getMobileEditorStatusClassName(saveState);
   const editorActionDisabled =
     !memo || !editor || saveState === "loading" || saveState === "compressing" || saveState === "uploading" || saveState === "leaving";
   const currentNotebookLabel =
-    notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name ?? (notebookOptions.length === 0 ? "等待分类" : "笔记本");
+    notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name ?? t("editor.notebookFallback");
 
   const fallbackMarkdown = memo ? docToMarkdown(contentJsonRef.current) : "";
+  const tableActive = Boolean(editor?.isActive("table"));
+  const tableHeaderActive = Boolean(editor?.isActive("tableHeader"));
 
   const runEditorCommand = (command: () => boolean) => {
     if (editorActionDisabled || !editor) {
@@ -800,6 +847,32 @@ export const MobileStandaloneTiptapEditor = ({
 
     command();
     editor.commands.focus();
+  };
+
+  const runTableAction = (action: MobileEditorTableActionId) => {
+    runEditorCommand(() => {
+      const chain = editor?.chain().focus();
+      if (!chain) {
+        return false;
+      }
+
+      switch (action) {
+        case "insertTable":
+          return chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run();
+        case "addTableRow":
+          return chain.addRowAfter().run();
+        case "deleteTableRow":
+          return editor?.isActive("tableHeader") ? false : chain.deleteRow().run();
+        case "addTableColumn":
+          return chain.addColumnAfter().run();
+        case "deleteTableColumn":
+          return chain.deleteColumn().run();
+        case "toggleTableHeader":
+          return chain.toggleHeaderRow().run();
+        case "deleteTable":
+          return chain.deleteTable().run();
+      }
+    });
   };
 
   return (
@@ -814,7 +887,7 @@ export const MobileStandaloneTiptapEditor = ({
           autoComplete="on"
           autoCorrect="on"
           inputMode="text"
-          placeholder={DEFAULT_MOBILE_EDITOR_MEMO_TITLE}
+          placeholder={t("common.untitledMemo")}
           onChange={(event) => handleTitleChange(event.target.value)}
         />
         <div className="mobile-editor-meta-row">
@@ -829,7 +902,7 @@ export const MobileStandaloneTiptapEditor = ({
             autoComplete="on"
             autoCorrect="on"
             inputMode="text"
-            placeholder="添加标签，用逗号分隔"
+            placeholder={t("editor.tagPlaceholder")}
             onChange={(event) => handleTagsChange(event.target.value)}
           />
         </div>
@@ -839,21 +912,39 @@ export const MobileStandaloneTiptapEditor = ({
           boldActive={Boolean(editor?.isActive("bold"))}
           bulletListActive={Boolean(editor?.isActive("bulletList"))}
           blockquoteActive={Boolean(editor?.isActive("blockquote"))}
+          mermaidActive={Boolean(editor?.isActive("codeBlock", { language: "mermaid" }))}
+          tableActive={tableActive}
+          tableHeaderActive={tableHeaderActive}
+          locale={locale}
           onPickImage={() => imageInputRef.current?.click()}
+          onInsertMermaid={() => runEditorCommand(() => {
+            if (!editor) {
+              return false;
+            }
+            if (editor.isActive("codeBlock")) {
+              return editor.chain().focus().updateAttributes("codeBlock", { language: "mermaid" }).run();
+            }
+            return editor.chain().focus().insertContent({
+              type: "codeBlock",
+              attrs: { language: "mermaid" },
+              content: [{ type: "text", text: "flowchart LR\n  A[Start] --> B[End]" }],
+            }).run();
+          })}
           onToggleBold={() => runEditorCommand(() => editor?.chain().focus().toggleBold().run() ?? false)}
           onToggleBulletList={() => runEditorCommand(() => editor?.chain().focus().toggleBulletList().run() ?? false)}
           onToggleBlockquote={() => runEditorCommand(() => editor?.chain().focus().toggleBlockquote().run() ?? false)}
           onSetHorizontalRule={() => runEditorCommand(() => editor?.chain().focus().setHorizontalRule().run() ?? false)}
+          onTableAction={runTableAction}
         />
         <input
           ref={imageInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp,image/avif"
+          accept="*/*"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";
-            void handleImageUpload(file);
+            void handleResourceUpload(file);
           }}
         />
 

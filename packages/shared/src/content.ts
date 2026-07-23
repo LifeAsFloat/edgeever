@@ -1,4 +1,5 @@
 import Image from "@tiptap/extension-image";
+import { TableKit } from "@tiptap/extension-table";
 import { Markdown, MarkdownManager } from "@tiptap/markdown";
 import StarterKit from "@tiptap/starter-kit";
 
@@ -32,7 +33,14 @@ export const emptyDoc = (): TiptapDoc => ({
 });
 
 const markdownManager = new MarkdownManager({
-  extensions: [StarterKit, Image, Markdown],
+  extensions: [
+    StarterKit,
+    TableKit,
+    Image,
+    Markdown.configure({
+      markedOptions: { gfm: true },
+    }),
+  ],
 });
 
 export const markdownToDoc = (markdown: string): TiptapDoc => {
@@ -41,6 +49,75 @@ export const markdownToDoc = (markdown: string): TiptapDoc => {
   }
 
   return markdownManager.parse(markdown.replace(/\r\n?/g, "\n")) as TiptapDoc;
+};
+
+const docContainsNodeType = (doc: TiptapDoc, nodeType: string): boolean => {
+  const visit = (nodes: TiptapNode[]): boolean => nodes.some((node) =>
+    node.type === nodeType || (node.content ? visit(node.content as TiptapNode[]) : false)
+  );
+
+  return visit(doc.content);
+};
+
+/**
+ * Recovers Markdown features that an older editor schema could not persist in
+ * contentJson. The stored Markdown remains the compatibility source in that
+ * case; otherwise the richer JSON document (for example image sizing attrs)
+ * keeps precedence.
+ */
+export const resolveMemoContentDoc = (
+  contentJson: TiptapDoc | null | undefined,
+  contentMarkdown: string | null | undefined
+): TiptapDoc => {
+  const currentDoc = contentJson && Array.isArray(contentJson.content)
+    ? upgradeLegacyAttachmentLinks(contentJson)
+    : emptyDoc();
+  if (!contentMarkdown?.trim() || docContainsNodeType(currentDoc, "table")) {
+    return currentDoc;
+  }
+
+  const markdownDoc = markdownToDoc(contentMarkdown);
+  return docContainsNodeType(markdownDoc, "table") ? markdownDoc : currentDoc;
+};
+
+const LEGACY_ATTACHMENT_PATTERN = /^(附件：|Attachment:\s*)(.+?)\s+(\/api\/v1\/resources\/\S+|https?:\/\/\S+)$/;
+
+const isTiptapTextNode = (node: TiptapNode | TiptapTextNode): node is TiptapTextNode =>
+  node.type === "text" && "text" in node;
+
+/** Convert the first-generation plain-text attachment insertion into a link mark. */
+const upgradeLegacyAttachmentLinks = (doc: TiptapDoc): TiptapDoc => {
+  let changed = false;
+  const visit = (node: TiptapNode | TiptapTextNode): TiptapNode | TiptapTextNode => {
+    if (isTiptapTextNode(node)) {
+      const match = node.text.match(LEGACY_ATTACHMENT_PATTERN);
+      if (!match) {
+        return node;
+      }
+
+      const existingMarks = node.marks ?? [];
+      if (existingMarks.some((mark) => mark.type === "link")) {
+        return node;
+      }
+
+      changed = true;
+      return {
+        ...node,
+        text: `${match[1]}${match[2]}`,
+        marks: [
+          ...existingMarks,
+          { type: "link", attrs: { href: match[3], target: "_blank", class: "edgeever-attachment-link" } },
+        ],
+      };
+    }
+
+    return node.content
+      ? { ...node, content: node.content.map((child: TiptapNode | TiptapTextNode) => visit(child)) }
+      : node;
+  };
+
+  const upgradedDoc = visit(doc) as TiptapDoc;
+  return changed ? upgradedDoc : doc;
 };
 
 export const docToText = (doc: unknown): string => {
@@ -78,6 +155,53 @@ export const docToText = (doc: unknown): string => {
   walk(doc);
 
   return pieces.join(" ").replace(/\s+/g, " ").trim();
+};
+
+let memoCharacterSegmenter: Intl.Segmenter | null | undefined;
+
+const getMemoCharacterSegmenter = () => {
+  if (memoCharacterSegmenter !== undefined) {
+    return memoCharacterSegmenter;
+  }
+
+  memoCharacterSegmenter = typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+
+  return memoCharacterSegmenter;
+};
+
+/**
+ * Counts visible memo-body characters while excluding whitespace. Formatting,
+ * titles, tags, and image labels are intentionally not part of the count.
+ */
+export const countMemoCharacters = (doc: unknown): number => {
+  const pieces: string[] = [];
+
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== "object") {
+      return;
+    }
+
+    const current = node as { text?: unknown; content?: unknown };
+
+    if (typeof current.text === "string") {
+      pieces.push(current.text);
+    }
+
+    if (Array.isArray(current.content)) {
+      for (const child of current.content) {
+        walk(child);
+      }
+    }
+  };
+
+  walk(doc);
+  const text = pieces.join("");
+  const segmenter = getMemoCharacterSegmenter();
+  const characters = segmenter ? Array.from(segmenter.segment(text), ({ segment }) => segment) : Array.from(text);
+
+  return characters.reduce((count, character) => count + (/^\s+$/u.test(character) ? 0 : 1), 0);
 };
 
 export const docToMarkdown = (doc: unknown): string => {

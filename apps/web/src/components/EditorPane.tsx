@@ -1,10 +1,12 @@
 import { useRef, useState, useEffect, useCallback, useMemo, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { NodeViewWrapper, ReactNodeViewRenderer, useEditor, EditorContent, type Editor, type NodeViewProps } from "@tiptap/react";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
-import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import Image from "@tiptap/extension-image";
 import Placeholder from "@tiptap/extension-placeholder";
+import { TableKit } from "@tiptap/extension-table";
 import { useTranslation } from "react-i18next";
 import {
   ChevronLeft,
@@ -17,6 +19,8 @@ import {
   Save,
   ReplaceAll,
   MoreHorizontal,
+  Maximize2,
+  Minimize2,
   Paperclip,
   Pencil,
   Sparkles,
@@ -49,35 +53,44 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { EditorToolbar } from "./EditorToolbar";
 import { ThemeToggle } from "./ThemeToggle";
+import { useTheme } from "./ThemeProvider";
 import { RevisionHistoryDialog } from "./dialogs/RevisionHistoryDialog";
 import { api } from "@/lib/api";
 import { consumeStandaloneMobileEditorReturn, openStandaloneMobileEditor } from "@/lib/mobile-editor";
 import { cn, formatDateTime, parseTagsText } from "@/lib/utils";
-import { docToMarkdown, markdownToDoc, type Notebook, type MemoDetail, type MemoEditSession, type TiptapDoc } from "@edgeever/shared";
-import { codeBlockLowlight } from "@/lib/code-block";
+import {
+  countMemoCharacters,
+  docToMarkdown,
+  markdownToDoc,
+  resolveMemoContentDoc,
+  type Notebook,
+  type MemoDetail,
+  type MemoEditSession,
+  type TiptapDoc,
+} from "@edgeever/shared";
+import {
+  DEFAULT_IMAGE_WIDTH_PERCENT,
+  IMAGE_WIDTH_PRESETS,
+  clampImageWidth,
+  parseImageWidth,
+} from "@edgeever/shared/image-display";
+import { codeBlockLowlight, EdgeEverCodeBlock } from "@/lib/code-block";
 import { compressImageForUpload } from "@/lib/image-compression";
 import { localDb, type MemoUpdateSyncPayload } from "@/lib/local-db";
 import { getMemoUpdateQueueId, isMemoUpdateAlreadyApplied, queueMemoUpdate, shouldQueueMemoSaveError } from "@/lib/sync-queue";
 import {
+  getEditableMemoTitle,
   getNotebookMoveOptions,
-  DEFAULT_MEMO_TITLE,
 } from "@/lib/app-helpers";
 
 const SUPPORTED_PASTE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
 const MOBILE_EDITOR_QUERY = "(max-width: 639px)";
 const EDITOR_AUTO_SAVE_DELAY_MS = 1200;
 const MOBILE_DRAFT_PERSIST_DELAY_MS = 800;
-const DEFAULT_IMAGE_WIDTH_PERCENT = 72;
-const MIN_IMAGE_WIDTH_PERCENT = 25;
-const MAX_IMAGE_WIDTH_PERCENT = 100;
-const IMAGE_WIDTH_PRESETS = [
-  { width: 35, labelKey: "editor.imageSizeSmall" },
-  { width: 50, labelKey: "editor.imageSizeMedium" },
-  { width: 72, labelKey: "editor.imageSizeLarge" },
-  { width: 100, labelKey: "editor.imageSizeFull" },
-] as const;
+const NOTE_SEARCH_HIGHLIGHT_PLUGIN_KEY = new PluginKey("edgeever-note-search-highlight");
 
 type NoteSearchMatch = {
   from: number;
@@ -168,17 +181,17 @@ const focusMobilePlainTextElement = (element: MobilePlainTextElement | null) => 
   selection?.addRange(range);
 };
 
-const getEditorSearchMatches = (editor: Editor | null, query: string): NoteSearchMatch[] => {
+const getSearchMatchesFromDocument = (doc: Editor["state"]["doc"], query: string): NoteSearchMatch[] => {
   const needle = query.trim().toLocaleLowerCase();
 
-  if (!isEditorReady(editor) || needle.length === 0) {
+  if (needle.length === 0) {
     return [];
   }
 
   const characters: Array<{ char: string; pos: number }> = [];
   let previousTextEnd: number | null = null;
 
-  editor.state.doc.descendants((node, pos) => {
+  doc.descendants((node, pos) => {
     if (!node.isText || !node.text) {
       return;
     }
@@ -212,7 +225,15 @@ const getEditorSearchMatches = (editor: Editor | null, query: string): NoteSearc
   return matches;
 };
 
-const getImageFilesFromDataTransfer = (dataTransfer: DataTransfer | null) => {
+const getEditorSearchMatches = (editor: Editor | null, query: string): NoteSearchMatch[] => {
+  if (!isEditorReady(editor)) {
+    return [];
+  }
+
+  return getSearchMatchesFromDocument(editor.state.doc, query);
+};
+
+const getResourceFilesFromDataTransfer = (dataTransfer: DataTransfer | null) => {
   if (!dataTransfer) {
     return [];
   }
@@ -223,23 +244,7 @@ const getImageFilesFromDataTransfer = (dataTransfer: DataTransfer | null) => {
     .filter((file): file is File => Boolean(file));
   const files = fileItems.length > 0 ? fileItems : Array.from(dataTransfer.files ?? []);
 
-  return files.filter((file) => SUPPORTED_PASTE_IMAGE_TYPES.has(file.type));
-};
-
-const clampImageWidth = (width: number) =>
-  Math.min(MAX_IMAGE_WIDTH_PERCENT, Math.max(MIN_IMAGE_WIDTH_PERCENT, Math.round(width)));
-
-const parseImageWidth = (value: unknown) => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return clampImageWidth(value);
-  }
-
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const match = /(\d+(?:\.\d+)?)/.exec(value);
-  return match ? clampImageWidth(Number(match[1])) : null;
+  return files.filter((file) => file.size > 0);
 };
 
 const ResizableImageNodeView = ({ editor, node, selected, updateAttributes }: NodeViewProps) => {
@@ -404,6 +409,7 @@ const MobileNotebookSelectSheet = ({
   onClose: () => void;
   onSelect: (notebookId: string) => void;
 }) => {
+  const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -420,16 +426,16 @@ const MobileNotebookSelectSheet = ({
       <DrawerContent className="inset-x-0 max-h-[62dvh] overflow-hidden border-x-0 border-b-0 pb-[env(safe-area-inset-bottom)] lg:hidden">
         <header className="flex h-12 items-center justify-between border-b border-slate-200 px-4">
           <DrawerHeader className="min-w-0 p-0">
-            <DrawerTitle className="text-base">所在笔记本</DrawerTitle>
+            <DrawerTitle className="text-base">{t("editor.currentNotebook")}</DrawerTitle>
           </DrawerHeader>
-          <Button size="icon" variant="ghost" title="关闭" aria-label="关闭" onClick={onClose}>
+          <Button size="icon" variant="ghost" title={t("editor.close")} aria-label={t("editor.close")} onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </header>
         <Command className="min-h-0 flex-1">
-          <CommandInput placeholder="搜索笔记本" />
+          <CommandInput placeholder={t("editor.searchNotebook")} />
           <CommandList ref={listRef} className="max-h-[calc(62dvh-6.25rem-env(safe-area-inset-bottom))] p-2">
-            <CommandEmpty>没有找到笔记本</CommandEmpty>
+            <CommandEmpty>{t("editor.noNotebookFound")}</CommandEmpty>
             <CommandGroup>
               {options.map((option) => {
                 const selected = option.id === selectedNotebookId;
@@ -444,7 +450,7 @@ const MobileNotebookSelectSheet = ({
                     value={option.id}
                     keywords={[option.name, option.selectLabel, option.slug ?? ""]}
                     data-mobile-notebook-select-id={option.id}
-                    aria-label={selected ? `当前所在笔记本：${option.name}` : `切换到 ${option.name}`}
+                    aria-label={selected ? t("editor.currentNotebookAria", { name: option.name }) : t("editor.switchToNotebook", { name: option.name })}
                     aria-current={selected ? "page" : undefined}
                     disabled={isUpdating}
                     onSelect={() => onSelect(option.id)}
@@ -463,12 +469,15 @@ const MobileNotebookSelectSheet = ({
 
 type EditorPaneProps = {
   memo: MemoDetail | null;
+  desktopFocusMode: boolean;
+  onToggleDesktopFocusMode: () => void;
   mobileDefaultEditMemoId: string | null;
   preserveUnsavedContentFromMemoId?: string | null;
   saveBlocked?: boolean;
   isTrashView: boolean;
   notebooks: Notebook[];
   isLoading: boolean;
+  contentSearchQuery?: string;
   imageCompressionEnabled: boolean;
   hasNextMemo: boolean;
   hasPreviousMemo: boolean;
@@ -498,6 +507,7 @@ const MobileNativeEditorPane = ({
   onMobileDefaultEditConsumed,
   onExitMobileNativeEdit,
 }: EditorPaneProps & { onExitMobileNativeEdit: () => void }) => {
+  const { t } = useTranslation();
   const titleRef = useRef<HTMLInputElement | null>(null);
   const tagsRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
@@ -515,7 +525,7 @@ const MobileNativeEditorPane = ({
   const [mobileNotebookSheetOpen, setMobileNotebookSheetOpen] = useState(false);
   const notebookOptions = useMemo(() => getNotebookMoveOptions(notebooks), [notebooks]);
   const readOnly = isTrashView || Boolean(memo?.isDeleted);
-  const currentNotebookLabel = notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name ?? "笔记本";
+  const currentNotebookLabel = notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name ?? t("editor.notebookFallback");
 
   const getTitleValue = useCallback(() => titleRef.current?.value ?? "", []);
   const getTagsValue = useCallback(() => tagsRef.current?.value ?? "", []);
@@ -748,9 +758,11 @@ const MobileNativeEditorPane = ({
       const draftUpdatedAt = draft ? Date.parse(draft.updatedAt) : 0;
       const remoteUpdatedAt = Date.parse(memo.updatedAt);
       const useDraft = Boolean(draft && (queuedUpdate || draftUpdatedAt >= remoteUpdatedAt));
-      const nextTitle = useDraft && draft ? draft.title : memo.title ?? "";
+      const nextTitle = useDraft && draft ? draft.title : getEditableMemoTitle(memo.title);
       const nextTagsText = useDraft && draft ? draft.tagsText : memo.tags.join(", ");
-      const nextContent = useDraft && draft ? draft.contentJson : memo.contentJson;
+      const nextContent = useDraft && draft
+        ? draft.contentJson
+        : resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown);
       editSessionRef.current = editSessionResponse?.editSession ?? null;
 
       hydratingRef.current = true;
@@ -856,18 +868,18 @@ const MobileNativeEditorPane = ({
 
   const saveLabel =
     saveState === "saving"
-      ? "保存中"
+      ? t("editor.saveState.saving")
       : saveState === "saved"
-        ? "已保存"
+        ? t("editor.saveState.saved")
         : saveState === "queued"
-          ? "待同步"
+          ? t("editor.saveState.queued")
           : saveState === "conflict"
-            ? "有冲突"
+            ? t("editor.saveState.conflict")
             : saveState === "error"
-              ? "保存失败"
+              ? t("editor.saveState.error")
               : hasUnsavedChanges
-                ? "未保存"
-                : "已保存";
+                ? t("editor.saveState.unsaved")
+                : t("editor.saveState.saved");
 
   const saveStateClassName =
     saveState === "error" || saveState === "conflict"
@@ -880,9 +892,9 @@ const MobileNativeEditorPane = ({
 
   if (!memo) {
     return (
-      <div className="fixed inset-0 z-[90] flex items-center justify-center bg-white text-sm text-slate-500 sm:hidden">
-        加载中
-      </div>
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-white text-sm text-slate-500 sm:hidden">
+          {t("editor.loading")}
+        </div>
     );
   }
 
@@ -892,8 +904,8 @@ const MobileNativeEditorPane = ({
         <Button
           size="icon"
           variant="ghost"
-          title={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
-          aria-label={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
+          title={hasUnsavedChanges && !readOnly ? t("editor.saveAndBack") : t("editor.backToList")}
+          aria-label={hasUnsavedChanges && !readOnly ? t("editor.saveAndBack") : t("editor.backToList")}
           disabled={savingRef.current || notebookUpdatePending}
           onClick={() => void finishEditing(true)}
         >
@@ -909,7 +921,7 @@ const MobileNativeEditorPane = ({
             disabled={savingRef.current || notebookUpdatePending}
             onClick={() => void finishEditing(false)}
           >
-            {saveState === "saving" ? "保存中" : "完成"}
+            {saveState === "saving" ? t("editor.saveState.saving") : t("editor.done")}
           </button>
         </div>
       </header>
@@ -918,19 +930,19 @@ const MobileNativeEditorPane = ({
         <div className="space-y-3 px-4 pb-4 pt-4">
           <input
             ref={titleRef}
-            defaultValue={memo.title ?? ""}
+            defaultValue={getEditableMemoTitle(memo.title)}
             readOnly={readOnly}
             onInput={markDirty}
             className="block w-full border-0 bg-transparent text-2xl font-bold leading-tight text-slate-950 outline-none placeholder:text-slate-300"
-            placeholder={DEFAULT_MEMO_TITLE}
+            placeholder={t("common.untitledMemo")}
           />
           <div className="flex flex-wrap items-center gap-2">
             <button
               className="flex h-8 min-w-0 max-w-full items-center gap-1 rounded-md border border-transparent bg-transparent px-2 text-sm font-medium text-slate-600 outline-none disabled:opacity-50"
               type="button"
               disabled={readOnly || notebookUpdatePending}
-              title="所在笔记本"
-              aria-label={`所在笔记本：${currentNotebookLabel}`}
+              title={t("editor.currentNotebook")}
+              aria-label={t("editor.currentNotebookAria", { name: currentNotebookLabel })}
               onClick={() => setMobileNotebookSheetOpen(true)}
             >
               <span className="min-w-0 truncate">{currentNotebookLabel}</span>
@@ -944,7 +956,7 @@ const MobileNativeEditorPane = ({
                 readOnly={readOnly}
                 onInput={markDirty}
                 className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-slate-400"
-                placeholder="添加标签，用逗号分隔"
+                placeholder={t("editor.tagPlaceholder")}
               />
             </label>
           </div>
@@ -952,7 +964,7 @@ const MobileNativeEditorPane = ({
 
         <textarea
           ref={bodyRef}
-          defaultValue={docToMarkdown(memo.contentJson)}
+          defaultValue={docToMarkdown(resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown))}
           autoCapitalize="sentences"
           autoComplete="on"
           autoCorrect="on"
@@ -961,8 +973,8 @@ const MobileNativeEditorPane = ({
           name="memo-body-native"
           spellCheck
           readOnly={readOnly}
-          aria-label="笔记正文"
-          placeholder="开始记录..."
+          aria-label={t("editor.noteBodyAria")}
+          placeholder={t("editor.placeholder")}
           className="block min-h-[70dvh] w-full resize-none border-0 bg-white px-4 py-4 text-base leading-7 text-slate-900 outline-none placeholder:text-slate-400"
           style={{ WebkitUserSelect: "text", userSelect: "text", caretColor: "auto" }}
         />
@@ -987,6 +999,7 @@ export const EditorPane = (props: EditorPaneProps) => {
   );
   const [mobileNativeEditMemoId, setMobileNativeEditMemoId] = useState<string | null>(null);
   const standaloneOpenMemoIdRef = useRef<string | null>(null);
+  const { t } = useTranslation();
   const readOnly = props.isTrashView || Boolean(props.memo?.isDeleted);
   const mobileDefaultEditRequested = Boolean(
     props.memo?.id && props.memo.id === props.mobileDefaultEditMemoId && !readOnly
@@ -1055,7 +1068,7 @@ export const EditorPane = (props: EditorPaneProps) => {
   if (mobileNativeEditingActive) {
     return (
       <div className="flex h-full min-h-0 items-center justify-center bg-white text-sm font-medium text-slate-400">
-        打开编辑器
+        {t("editor.openEditor")}
       </div>
     );
   }
@@ -1076,12 +1089,15 @@ export const EditorPane = (props: EditorPaneProps) => {
 
 const RichEditorPane = ({
   memo,
+  desktopFocusMode,
+  onToggleDesktopFocusMode,
   mobileDefaultEditMemoId,
   preserveUnsavedContentFromMemoId: _preserveUnsavedContentFromMemoId,
   saveBlocked: _saveBlocked = false,
   isTrashView,
   notebooks,
   isLoading,
+  contentSearchQuery = "",
   imageCompressionEnabled,
   hasNextMemo,
   hasPreviousMemo,
@@ -1098,6 +1114,8 @@ const RichEditorPane = ({
   selectionActionBar,
   onRequestMobileNativeEdit,
 }: RichEditorPaneProps) => {
+  const { t } = useTranslation();
+  const { editorTheme } = useTheme();
   const queryClient = useQueryClient();
   const isSelectionMode = Boolean(selectionActionBar);
   const [title, setTitle] = useState("");
@@ -1106,6 +1124,7 @@ const RichEditorPane = ({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [dirtyVersion, setDirtyVersion] = useState(0);
   const [, setEditorStateVersion] = useState(0);
+  const [editorContentVersion, setEditorContentVersion] = useState(0);
   const [imageUploadState, setImageUploadState] = useState<"idle" | "compressing" | "uploading" | "error">("idle");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [mobileNotebookSheetOpen, setMobileNotebookSheetOpen] = useState(false);
@@ -1137,6 +1156,7 @@ const RichEditorPane = ({
   const memoRef = useRef<MemoDetail | null>(memo);
   const editSessionRef = useRef<MemoEditSession | null>(null);
   const editorRef = useRef<Editor | null>(null);
+  const editorScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const mobileTextAreaRef = useRef<MobilePlainTextElement | null>(null);
   const mobileDraftTimerRef = useRef<number | null>(null);
   const mobileSaveTimerRef = useRef<number | null>(null);
@@ -1214,55 +1234,6 @@ const RichEditorPane = ({
     }
   }, [focusMobileInputTarget, isMobileViewport, memo?.id, mobileDefaultEditMemoId, onMobileDefaultEditConsumed, readOnly]);
 
-  const insertImageFiles = useCallback((files: File[]) => {
-    const currentMemo = memoRef.current;
-    const currentEditor = editorRef.current;
-
-    if (!currentMemo || currentMemo.isDeleted || !currentEditor || !currentEditor.isEditable || files.length === 0) {
-      return;
-    }
-
-    const targetMemoId = currentMemo.id;
-
-    void (async () => {
-      setImageUploadState("uploading");
-
-      try {
-        for (const file of files) {
-          const shouldCompress = imageCompressionEnabledRef.current;
-          setImageUploadState(shouldCompress ? "compressing" : "uploading");
-          const uploadFile = shouldCompress ? (await compressImageForUpload(file)).file : file;
-
-          setImageUploadState("uploading");
-          const { resource } = await api.uploadMemoResource(targetMemoId, uploadFile);
-          void queryClient.invalidateQueries({ queryKey: ["resources"] });
-
-          const activeEditor = editorRef.current;
-          if (memoRef.current?.id !== targetMemoId || !isEditorReady(activeEditor)) {
-            setImageUploadState("idle");
-            return;
-          }
-
-          activeEditor
-            .chain()
-            .focus()
-            .setImage({
-              src: resource.url,
-              alt: file.name,
-              title: file.name,
-              width: DEFAULT_IMAGE_WIDTH_PERCENT,
-            })
-            .run();
-        }
-
-        setImageUploadState("idle");
-      } catch {
-        setImageUploadState("error");
-        window.setTimeout(() => setImageUploadState("idle"), 2200);
-      }
-    })();
-  }, [queryClient]);
-
   const insertResourceFiles = useCallback((files: File[]) => {
     const currentMemo = memoRef.current;
     const currentEditor = editorRef.current;
@@ -1310,7 +1281,14 @@ const RichEditorPane = ({
               .focus()
               .insertContent({
                 type: "paragraph",
-                content: [{ type: "text", text: `附件：${resource.filename || file.name} ${resource.url}` }],
+                content: [{
+                  type: "text",
+                  text: t("editor.attachmentLabel", { filename: resource.filename || file.name }),
+                  marks: [{
+                    type: "link",
+                    attrs: { href: resource.url, target: "_blank", class: "edgeever-attachment-link" },
+                  }],
+                }],
               })
               .run();
           }
@@ -1322,46 +1300,82 @@ const RichEditorPane = ({
         window.setTimeout(() => setImageUploadState("idle"), 2200);
       }
     })();
-  }, [queryClient]);
+  }, [queryClient, t]);
 
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ codeBlock: false }),
-      CodeBlockLowlight.configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
+      EdgeEverCodeBlock.configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
       ResizableImage.configure({
         allowBase64: false,
         inline: false,
       }),
+      TableKit.configure({
+        table: { renderWrapper: true },
+      }),
       Placeholder.configure({
-        placeholder: "开始记录...",
+        placeholder: t("editor.placeholder"),
       }),
     ],
-    content: memo?.contentJson ?? { type: "doc", content: [{ type: "paragraph" }] },
+    content: memo
+      ? resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown)
+      : { type: "doc", content: [{ type: "paragraph" }] },
     editable: Boolean(memo && !effectiveReadOnly),
     editorProps: {
       attributes: {
         class: "prose prose-slate max-w-none focus:outline-none min-h-[300px] px-4 py-3 sm:px-7",
       },
+      handleKeyDown: (view, event) => {
+        const shortcutKey = event.key.toLowerCase();
+        if (
+          (shortcutKey !== "f" && shortcutKey !== "h") ||
+          (!event.ctrlKey && !event.metaKey) ||
+          event.altKey ||
+          (shortcutKey === "f" && event.shiftKey)
+        ) {
+          return false;
+        }
+
+        const { from, to } = view.state.selection;
+        if (from === to) {
+          return false;
+        }
+
+        const selectedText = view.state.doc.textBetween(from, to, "\n").trim();
+        if (!selectedText) {
+          return false;
+        }
+
+        event.preventDefault();
+        setNoteSearchQuery(selectedText);
+        setNoteSearchOpen(true);
+        setNoteSearchReplaceOpen(shortcutKey === "h");
+        window.requestAnimationFrame(() => {
+          noteSearchInputRef.current?.focus();
+          noteSearchInputRef.current?.select();
+        });
+        return true;
+      },
       handlePaste: (_view, event) => {
-        const files = getImageFilesFromDataTransfer(event.clipboardData);
+        const files = getResourceFilesFromDataTransfer(event.clipboardData);
 
         if (files.length === 0) {
           return false;
         }
 
         event.preventDefault();
-        insertImageFiles(files);
+        insertResourceFiles(files);
         return true;
       },
       handleDrop: (_view, event) => {
-        const files = getImageFilesFromDataTransfer(event.dataTransfer);
+        const files = getResourceFilesFromDataTransfer(event.dataTransfer);
 
         if (files.length === 0) {
           return false;
         }
 
         event.preventDefault();
-        insertImageFiles(files);
+        insertResourceFiles(files);
         return true;
       },
     },
@@ -1380,23 +1394,109 @@ const RichEditorPane = ({
     };
   }, [editor]);
 
+  useEffect(() => {
+    if (!isEditorReady(editor)) {
+      return;
+    }
+
+    const refreshCharacterCount = () => setEditorContentVersion((version) => version + 1);
+    editor.on("update", refreshCharacterCount);
+
+    return () => {
+      editor.off("update", refreshCharacterCount);
+    };
+  }, [editor]);
+
   const noteSearchMatches = useMemo(
     () => getEditorSearchMatches(editor, noteSearchQuery),
     [dirtyVersion, editor, memo?.id, noteSearchQuery]
   );
+  const contentSearchMatches = useMemo(
+    () => getEditorSearchMatches(editor, contentSearchQuery),
+    [contentSearchQuery, dirtyVersion, editor, memo?.id]
+  );
 
   const selectNoteSearchMatch = useCallback(
-    (index: number) => {
-      const match = noteSearchMatches[index];
+    (index: number, matches = noteSearchMatches) => {
+      const match = matches[index];
 
       if (!isEditorReady(editor) || !match) {
         return;
       }
 
-      editor.commands.setTextSelection({ from: match.from, to: match.to });
+      // `setTextSelection` updates the ProseMirror selection but does not
+      // request the view to scroll to it. This is especially visible while
+      // the search input keeps focus, because the browser cannot scroll the
+      // editor selection for us in that case.
+      editor.chain().setTextSelection({ from: match.from, to: match.to }).scrollIntoView().run();
+
+      window.requestAnimationFrame(() => {
+        const scrollContainer = editorScrollContainerRef.current;
+        const domPosition = editor.view.domAtPos(match.from);
+        const node = domPosition.node.nodeType === Node.TEXT_NODE
+          ? domPosition.node.parentElement
+          : domPosition.node instanceof Element
+            ? domPosition.node
+            : domPosition.node.parentElement;
+
+        if (!scrollContainer || !node) {
+          return;
+        }
+
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const nodeRect = node.getBoundingClientRect();
+        const padding = 24;
+        const isAbove = nodeRect.top < containerRect.top + padding;
+        const isBelow = nodeRect.bottom > containerRect.bottom - padding;
+
+        if (isAbove || isBelow) {
+          const targetTop = scrollContainer.scrollTop + nodeRect.top - containerRect.top
+            - (scrollContainer.clientHeight - nodeRect.height) / 2;
+          scrollContainer.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+        }
+      });
     },
     [editor, noteSearchMatches]
   );
+
+  useEffect(() => {
+    if (!isEditorReady(editor)) {
+      return;
+    }
+
+    const searchHighlightPlugin = new Plugin({
+      key: NOTE_SEARCH_HIGHLIGHT_PLUGIN_KEY,
+      props: {
+        decorations: (state) => {
+          const currentQuery = noteSearchOpen ? noteSearchQuery : contentSearchQuery;
+          const currentMatches = getSearchMatchesFromDocument(state.doc, currentQuery);
+
+          if (currentMatches.length === 0) {
+            return DecorationSet.empty;
+          }
+
+          return DecorationSet.create(
+            state.doc,
+            currentMatches.map((match, index) =>
+              Decoration.inline(match.from, match.to, {
+                class: index === (noteSearchOpen ? noteSearchIndex : 0)
+                  ? "edgeever-search-match edgeever-search-match-active"
+                  : "edgeever-search-match",
+              })
+            )
+          );
+        },
+      },
+    });
+
+    editor.registerPlugin(searchHighlightPlugin);
+
+    return () => {
+      if (isEditorReady(editor)) {
+        editor.unregisterPlugin(NOTE_SEARCH_HIGHLIGHT_PLUGIN_KEY);
+      }
+    };
+  }, [contentSearchQuery, editor, noteSearchIndex, noteSearchMatches, noteSearchOpen, noteSearchQuery]);
 
   const focusNoteSearchInput = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -1423,6 +1523,27 @@ const RichEditorPane = ({
       editor.commands.focus();
     }
   }, [editor]);
+
+  useEffect(() => {
+    if (!noteSearchOpen) {
+      return;
+    }
+
+    const handleNoteSearchEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      closeNoteSearch();
+    };
+
+    // Capture the event so Escape works even when focus has moved to the
+    // editor, toolbar, or another control outside the search inputs.
+    window.addEventListener("keydown", handleNoteSearchEscape, true);
+    return () => window.removeEventListener("keydown", handleNoteSearchEscape, true);
+  }, [closeNoteSearch, noteSearchOpen]);
 
   const moveNoteSearchMatch = useCallback(
     (direction: 1 | -1) => {
@@ -1459,9 +1580,11 @@ const RichEditorPane = ({
     setNoteSearchIndex(0);
 
     if (noteSearchOpen && noteSearchMatches[0]) {
-      selectNoteSearchMatch(0);
+      selectNoteSearchMatch(0, noteSearchMatches);
+    } else if (!noteSearchOpen && contentSearchMatches[0]) {
+      selectNoteSearchMatch(0, contentSearchMatches);
     }
-  }, [noteSearchMatches, noteSearchOpen, selectNoteSearchMatch]);
+  }, [contentSearchMatches, noteSearchMatches, noteSearchOpen, selectNoteSearchMatch]);
 
   const replaceAllNoteSearchMatches = useCallback(() => {
     if (!isEditorReady(editor) || effectiveReadOnly || noteSearchMatches.length === 0) {
@@ -1612,6 +1735,13 @@ const RichEditorPane = ({
     return currentEditor.getJSON() as TiptapDoc;
   }, [getMobilePlainTextValue, markdownSource, useMarkdownSourceEditor, useMobilePlainTextEditor]);
 
+  const characterCount = useMemo(() => {
+    const contentJson = getCurrentContentJson()
+      ?? (memo ? resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown) : null);
+
+    return countMemoCharacters(contentJson);
+  }, [dirtyVersion, editorContentVersion, getCurrentContentJson, memo]);
+
   const currentSnapshot = useCallback(() => {
     const contentJson = getCurrentContentJson();
     if (!contentJson) {
@@ -1685,9 +1815,11 @@ const RichEditorPane = ({
       const draftUpdatedAt = draft ? Date.parse(draft.updatedAt) : 0;
       const remoteUpdatedAt = Date.parse(memo.updatedAt);
       const useDraft = Boolean(draft && (queuedUpdate || draftUpdatedAt >= remoteUpdatedAt));
-      const nextTitle = useDraft && draft ? draft.title : memo.title ?? "";
+      const nextTitle = useDraft && draft ? draft.title : getEditableMemoTitle(memo.title);
       const nextTagsText = useDraft && draft ? draft.tagsText : memo.tags.join(", ");
-      const nextContent = useDraft && draft ? draft.contentJson : memo.contentJson;
+      const nextContent = useDraft && draft
+        ? draft.contentJson
+        : resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown);
       const nextMarkdown = docToMarkdown(nextContent);
       const nextHasUnsavedChanges = Boolean(useDraft && !queuedUpdate);
 
@@ -1732,7 +1864,7 @@ const RichEditorPane = ({
     }
 
     if (memo) {
-      const nextMarkdown = docToMarkdown(memo.contentJson);
+      const nextMarkdown = docToMarkdown(resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown));
       setMobilePlainText(nextMarkdown);
       setMobilePlainTextElementValue(mobileTextAreaRef.current, nextMarkdown);
     }
@@ -2065,7 +2197,7 @@ const RichEditorPane = ({
     return (
       <div className="flex h-full min-w-0 flex-col bg-white">
         {selectionActionBar}
-        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-500">加载中</div>
+        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-500">{t("editor.loading")}</div>
       </div>
     );
   }
@@ -2077,7 +2209,7 @@ const RichEditorPane = ({
         <div className="flex min-h-0 flex-1 items-center justify-center px-8 text-center">
           <div>
             <Sparkles className="mx-auto mb-3 h-8 w-8 text-slate-300 animate-pulse" />
-            <div className="text-sm font-medium text-slate-400">选择或新建一条笔记</div>
+            <div className="text-sm font-medium text-slate-400">{t("editor.emptySelection")}</div>
           </div>
         </div>
       </div>
@@ -2086,18 +2218,18 @@ const RichEditorPane = ({
 
   const saveLabel =
     saveState === "saving"
-      ? "保存中"
+      ? t("editor.saveState.saving")
       : saveState === "saved"
-        ? "已保存"
+        ? t("editor.saveState.saved")
         : saveState === "queued"
-          ? "待同步"
+          ? t("editor.saveState.queued")
           : saveState === "conflict"
-            ? "有冲突"
+            ? t("editor.saveState.conflict")
             : saveState === "error"
-              ? "保存失败"
+              ? t("editor.saveState.error")
               : hasUnsavedChanges
-                ? "未保存"
-                : "已保存";
+                ? t("editor.saveState.unsaved")
+                : t("editor.saveState.saved");
 
   const saveStateClassName =
     saveState === "error" || saveState === "conflict"
@@ -2110,11 +2242,11 @@ const RichEditorPane = ({
 
   const imageUploadLabel =
     imageUploadState === "error"
-      ? "上传失败"
+      ? t("editor.uploadState.failed")
       : imageUploadState === "compressing"
-        ? "压缩中"
+        ? t("editor.uploadState.compressing")
         : imageUploadState === "uploading"
-          ? "上传中"
+          ? t("editor.uploadState.uploading")
           : null;
 
   const mobileStatusLabel = imageUploadLabel ?? saveLabel;
@@ -2126,7 +2258,7 @@ const RichEditorPane = ({
         : saveStateClassName;
 
   const updatedLabel = formatDateTime(memo.updatedAt);
-  const currentNotebookLabel = notebookOptions.find((notebook) => notebook.id === memo.notebookId)?.name ?? "笔记本";
+  const currentNotebookLabel = notebookOptions.find((notebook) => notebook.id === memo.notebookId)?.name ?? t("editor.notebookFallback");
 
   const mobileDoneDisabled =
     saveMutation.isPending ||
@@ -2167,7 +2299,7 @@ const RichEditorPane = ({
   };
 
   const handleMobilePromptInput = () => {
-    const nextText = window.prompt("输入笔记内容");
+    const nextText = window.prompt(t("editor.typeInput"));
     if (!nextText) {
       focusMobileInputTarget();
       return;
@@ -2188,7 +2320,7 @@ const RichEditorPane = ({
       appendMobilePlainText(nextText, "clipboard-input");
     } catch {
       recordMobileImeDebugEvent("clipboard-error");
-      window.alert("读取剪贴板失败。请确认浏览器允许剪贴板权限。");
+      window.alert(t("editor.clipboardReadFailed"));
       focusMobileInputTarget();
     }
   };
@@ -2288,8 +2420,8 @@ const RichEditorPane = ({
               className="lg:hidden"
               size="icon"
               variant="ghost"
-              title={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
-              aria-label={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
+              title={hasUnsavedChanges && !readOnly ? t("editor.saveAndBack") : t("editor.backToList")}
+              aria-label={hasUnsavedChanges && !readOnly ? t("editor.saveAndBack") : t("editor.backToList")}
               disabled={mobileDoneDisabled}
               onClick={handleMobileBack}
             >
@@ -2299,8 +2431,8 @@ const RichEditorPane = ({
               <button
                 className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-50 hover:text-slate-900 disabled:opacity-30"
                 type="button"
-                title="上一条笔记"
-                aria-label="上一条笔记"
+                title={t("editor.previousMemo")}
+                aria-label={t("editor.previousMemo")}
                 disabled={!hasPreviousMemo}
                 onClick={onOpenPreviousMemo}
               >
@@ -2309,8 +2441,8 @@ const RichEditorPane = ({
               <button
                 className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-50 hover:text-slate-900 disabled:opacity-30"
                 type="button"
-                title="下一条笔记"
-                aria-label="下一条笔记"
+                title={t("editor.nextMemo")}
+                aria-label={t("editor.nextMemo")}
                 disabled={!hasNextMemo}
                 onClick={onOpenNextMemo}
               >
@@ -2318,19 +2450,43 @@ const RichEditorPane = ({
               </button>
             </div>
             <div className="hidden items-center gap-1 lg:flex">
-              <Button size="icon" variant="ghost" title="上一条笔记" aria-label="上一条笔记" onClick={onOpenPreviousMemo} disabled={!hasPreviousMemo}>
+              <TooltipProvider delayDuration={350} skipDelayDuration={100}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="icon"
+                      variant={desktopFocusMode ? "soft" : "ghost"}
+                      aria-label={t(desktopFocusMode ? "editor.exitFocusMode" : "editor.enterFocusMode")}
+                      aria-pressed={desktopFocusMode}
+                      onClick={onToggleDesktopFocusMode}
+                    >
+                      {desktopFocusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {t(desktopFocusMode ? "editor.exitFocusMode" : "editor.focusMode")}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <Button size="icon" variant="ghost" title={t("editor.previousMemo")} aria-label={t("editor.previousMemo")} onClick={onOpenPreviousMemo} disabled={!hasPreviousMemo}>
                 <ChevronLeft className="h-4 w-4" />
               </Button>
-              <Button size="icon" variant="ghost" title="下一条笔记" aria-label="下一条笔记" onClick={onOpenNextMemo} disabled={!hasNextMemo}>
+              <Button size="icon" variant="ghost" title={t("editor.nextMemo")} aria-label={t("editor.nextMemo")} onClick={onOpenNextMemo} disabled={!hasNextMemo}>
                 <ChevronRight className="h-4 w-4" />
               </Button>
             </div>
             <span className="hidden truncate text-xs text-slate-400 sm:inline">
-              更新于 {updatedLabel}
+              {t("editor.updatedAt", { time: updatedLabel })}
             </span>
           </div>
 
           <div className="flex shrink-0 items-center gap-1">
+            <span
+              className="hidden whitespace-nowrap px-1.5 text-xs tabular-nums text-slate-400 sm:inline-flex"
+              title={t("editor.characterCount", { count: characterCount })}
+            >
+              {t("editor.characterCount", { count: characterCount })}
+            </span>
             {imageUploadState !== "idle" && (
               <span
                 className={cn(
@@ -2341,10 +2497,10 @@ const RichEditorPane = ({
                 )}
               >
                 {imageUploadState === "error"
-                  ? "文件上传失败"
+                  ? t("editor.uploadState.fileFailed")
                   : imageUploadState === "compressing"
-                    ? "图片压缩中"
-                    : "文件上传中"}
+                    ? t("editor.uploadState.imageCompressing")
+                    : t("editor.uploadState.fileUploading")}
               </span>
             )}
             <span className={cn("hidden rounded-md px-2 py-1 text-xs font-medium sm:inline-flex", saveStateClassName)}>
@@ -2360,7 +2516,7 @@ const RichEditorPane = ({
                 disabled={mobileDoneDisabled}
                 onClick={handleMobileDone}
               >
-                {saveMutation.isPending ? "保存中" : "完成"}
+                {saveMutation.isPending ? t("editor.saveState.saving") : t("editor.done")}
               </button>
             )}
             <input
@@ -2379,8 +2535,8 @@ const RichEditorPane = ({
                 className="sm:hidden"
                 size="icon"
                 variant="ghost"
-                title="上传附件"
-                aria-label="上传附件"
+                title={t("editor.uploadAttachment")}
+                aria-label={t("editor.uploadAttachment")}
                 disabled={mobileDoneDisabled || effectiveReadOnly}
                 onClick={() => fileInputRef.current?.click()}
               >
@@ -2392,8 +2548,8 @@ const RichEditorPane = ({
                 className="sm:hidden"
                 size="icon"
                 variant={mobileToolbarOpen ? "soft" : "ghost"}
-                title={mobileToolbarOpen ? "收起格式" : "格式"}
-                aria-label={mobileToolbarOpen ? "收起格式" : "格式"}
+                title={mobileToolbarOpen ? t("editor.collapseFormat") : t("editor.format")}
+                aria-label={mobileToolbarOpen ? t("editor.collapseFormat") : t("editor.format")}
                 aria-pressed={mobileToolbarOpen}
                 disabled={effectiveReadOnly}
                 onClick={() => setMobileToolbarOpen((open) => !open)}
@@ -2401,10 +2557,10 @@ const RichEditorPane = ({
                 <Type className="h-4 w-4" />
               </Button>
             )}
-            <Button className="hidden h-8 w-8 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-slate-300 sm:inline-flex" size="icon" variant="ghost" title="搜索当前笔记" aria-label="搜索当前笔记" onClick={() => openNoteSearch()}>
+            <Button className="hidden h-8 w-8 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-slate-300 sm:inline-flex" size="icon" variant="ghost" title={t("editor.searchCurrentMemo")} aria-label={t("editor.searchCurrentMemo")} onClick={() => openNoteSearch()}>
               <Search className="h-5 w-5" strokeWidth={2.25} />
             </Button>
-            <Button className="hidden h-8 w-8 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-slate-300 sm:inline-flex" size="icon" variant="ghost" title="版本历史" aria-label="版本历史" onClick={() => setHistoryOpen(true)}>
+            <Button className="hidden h-8 w-8 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:ring-2 focus-visible:ring-slate-300 sm:inline-flex" size="icon" variant="ghost" title={t("editor.versionHistory")} aria-label={t("editor.versionHistory")} onClick={() => setHistoryOpen(true)}>
               <History className="h-5 w-5" strokeWidth={2.25} />
             </Button>
             <GitHubRepositoryLink className="hidden h-8 w-8 justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70 lg:inline-flex" iconClassName="h-5 w-5" />
@@ -2414,8 +2570,8 @@ const RichEditorPane = ({
                 className="hidden sm:inline-flex"
                 size="icon"
                 variant="solid"
-                title="保存"
-                aria-label="保存"
+                title={t("editor.save")}
+                aria-label={t("editor.save")}
                 onClick={() => saveMutation.mutate()}
                 disabled={!editor || saveMutation.isPending || !hasUnsavedChanges}
               >
@@ -2428,8 +2584,8 @@ const RichEditorPane = ({
                   className={cn(!mobileEditingActive && !readOnly && "hidden sm:inline-flex")}
                   size="icon"
                   variant="ghost"
-                  title="更多"
-                  aria-label="笔记更多操作"
+                  title={t("editor.more")}
+                  aria-label={t("editor.moreAria")}
                 >
                   <MoreHorizontal className="h-4 w-4" />
                 </Button>
@@ -2440,14 +2596,14 @@ const RichEditorPane = ({
                   onClick={() => openNoteSearch()}
                 >
                   <Search className="h-4 w-4 text-slate-500" />
-                  搜索当前笔记
+                  {t("editor.searchCurrentMemo")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="flex h-9 w-full items-center gap-2 px-3 text-left text-sm text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
                   onClick={openNoteReplace}
                 >
                   <ReplaceAll className="h-4 w-4 text-slate-500" />
-                  替换当前笔记
+                  {t("editor.replaceCurrentMemo")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="flex h-9 w-full items-center gap-2 px-3 text-left text-sm text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
@@ -2456,7 +2612,7 @@ const RichEditorPane = ({
                   }}
                 >
                   <History className="h-4 w-4 text-slate-500" />
-                  版本历史
+                  {t("editor.versionHistory")}
                 </DropdownMenuItem>
                 {readOnly ? (
                   <>
@@ -2465,7 +2621,7 @@ const RichEditorPane = ({
                       onClick={() => void onRestored(memo.id)}
                     >
                       <RotateCcw className="h-4 w-4 text-slate-500" />
-                      恢复笔记
+                      {t("editor.restoreMemo")}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator className="my-1 h-px bg-slate-100" />
                     <DropdownMenuItem
@@ -2473,7 +2629,7 @@ const RichEditorPane = ({
                       onClick={() => void onPermanentDeleted(memo.id)}
                     >
                       <Trash2 className="h-4 w-4" />
-                      彻底删除
+                      {t("editor.deleteForever")}
                     </DropdownMenuItem>
                   </>
                 ) : (
@@ -2484,7 +2640,7 @@ const RichEditorPane = ({
                       onClick={() => void onDeleted(memo.id)}
                     >
                       <Trash2 className="h-4 w-4" />
-                      删除笔记
+                      {t("editor.deleteMemo")}
                     </DropdownMenuItem>
                   </>
                 )}
@@ -2493,7 +2649,7 @@ const RichEditorPane = ({
           </div>
         </div>
 
-        <div className="space-y-3 px-4 pb-4 pt-4 sm:px-7">
+        <div className="space-y-3 px-4 pb-4 pt-4 sm:px-7 lg:space-y-0 lg:pb-1 lg:pt-2">
           <input
             value={title}
             readOnly={effectiveReadOnly}
@@ -2503,15 +2659,15 @@ const RichEditorPane = ({
               markDirty();
             }}
             className="block w-full rounded-md border-0 bg-transparent text-2xl font-bold leading-tight text-slate-950 outline-none transition placeholder:text-slate-300 focus-visible:bg-slate-50 focus-visible:shadow-[inset_3px_0_0_var(--brand-green)] sm:text-3xl"
-            placeholder={DEFAULT_MEMO_TITLE}
+            placeholder={t("common.untitledMemo")}
           />
           <div className="flex flex-wrap items-center gap-2">
             <button
               className="flex h-8 min-w-0 max-w-full items-center gap-1 rounded-md border border-transparent bg-transparent px-2 text-sm font-medium text-slate-600 outline-none transition hover:border-slate-200 hover:bg-slate-50 hover:text-slate-900 focus-visible:border-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-500/20 disabled:opacity-50 sm:hidden"
               type="button"
               disabled={effectiveReadOnly || notebookUpdatePending}
-              title="所在笔记本"
-              aria-label={`所在笔记本：${currentNotebookLabel}`}
+              title={t("editor.currentNotebook")}
+              aria-label={t("editor.currentNotebookAria", { name: currentNotebookLabel })}
               onClick={() => setMobileNotebookSheetOpen(true)}
             >
               <span className="min-w-0 truncate">{currentNotebookLabel}</span>
@@ -2524,7 +2680,7 @@ const RichEditorPane = ({
                 onValueChange={(value) => handleNotebookChange(value)}
               >
                 <SelectTrigger className="h-8 min-w-0 border-transparent bg-transparent px-2 text-sm font-medium text-slate-600 hover:border-slate-200 hover:bg-slate-50 hover:text-slate-900 whitespace-nowrap">
-                  <SelectValue placeholder="所在笔记本" />
+                  <SelectValue placeholder={t("editor.notebookPlaceholder")} />
                 </SelectTrigger>
                 <SelectContent className="max-h-60 bg-white border border-slate-200 rounded-md py-1 shadow-md">
                   {notebookOptions.map((notebook) => (
@@ -2546,7 +2702,7 @@ const RichEditorPane = ({
                   markDirty();
                 }}
                 className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-slate-400"
-                placeholder="添加标签，用逗号分隔"
+                placeholder={t("editor.tagPlaceholder")}
               />
             </label>
           </div>
@@ -2558,7 +2714,7 @@ const RichEditorPane = ({
               ref={noteSearchInputRef}
               value={noteSearchQuery}
               className="h-8 min-w-[12rem] flex-1"
-              placeholder="在当前笔记内搜索"
+              placeholder={t("editor.searchPlaceholder")}
               onChange={(event) => setNoteSearchQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -2577,7 +2733,7 @@ const RichEditorPane = ({
                 ref={noteReplaceInputRef}
                 value={noteSearchReplacement}
                 className="h-8 min-w-[12rem] flex-1"
-                placeholder="替换为"
+                placeholder={t("editor.replacePlaceholder")}
                 disabled={effectiveReadOnly}
                 onChange={(event) => setNoteSearchReplacement(event.target.value)}
                 onKeyDown={(event) => {
@@ -2605,8 +2761,8 @@ const RichEditorPane = ({
             <Button
               size="icon"
               variant="ghost"
-              title="上一个搜索结果"
-              aria-label="上一个搜索结果"
+              title={t("editor.previousSearchResult")}
+              aria-label={t("editor.previousSearchResult")}
               disabled={noteSearchMatches.length === 0}
               onClick={() => moveNoteSearchMatch(-1)}
             >
@@ -2615,8 +2771,8 @@ const RichEditorPane = ({
             <Button
               size="icon"
               variant="ghost"
-              title="下一个搜索结果"
-              aria-label="下一个搜索结果"
+              title={t("editor.nextSearchResult")}
+              aria-label={t("editor.nextSearchResult")}
               disabled={noteSearchMatches.length === 0}
               onClick={() => moveNoteSearchMatch(1)}
             >
@@ -2626,16 +2782,16 @@ const RichEditorPane = ({
               <Button
                 size="sm"
                 variant="solid"
-                title="全部替换"
-                aria-label="全部替换"
+                title={t("editor.replaceAll")}
+                aria-label={t("editor.replaceAll")}
                 disabled={effectiveReadOnly || noteSearchMatches.length === 0}
                 onClick={replaceAllNoteSearchMatches}
               >
                 <ReplaceAll className="h-4 w-4" />
-                全部替换
+                {t("editor.replaceAll")}
               </Button>
             )}
-            <Button size="icon" variant="ghost" title="关闭搜索" aria-label="关闭搜索" onClick={closeNoteSearch}>
+            <Button size="icon" variant="ghost" title={t("editor.closeSearch")} aria-label={t("editor.closeSearch")} onClick={closeNoteSearch}>
               <X className="h-4 w-4" />
             </Button>
           </div>
@@ -2646,11 +2802,14 @@ const RichEditorPane = ({
             readOnly={effectiveReadOnly}
             markdownMode={useMarkdownSourceEditor}
             onMarkdownModeChange={handleMarkdownModeChange}
+            onPickAttachment={() => fileInputRef.current?.click()}
           />
         )}
       </header>
 
       <div
+        ref={editorScrollContainerRef}
+        data-editor-theme={editorTheme}
         className={cn(
           "edgeever-editor relative min-h-0 flex-1 bg-white",
           useMobilePlainTextEditor ? "overflow-visible" : "overflow-y-auto"
@@ -2671,9 +2830,9 @@ const RichEditorPane = ({
               name="memo-body"
               spellCheck
               data-edgeever-mobile-editor="plain-textarea"
-              aria-label="笔记正文"
+              aria-label={t("editor.noteBodyAria")}
               className="block min-h-[60dvh] w-full resize-none border border-slate-200 bg-white px-4 py-3 pr-32 text-base leading-7 text-slate-950 outline-none placeholder:text-slate-400 sm:px-7"
-              placeholder="开始记录..."
+              placeholder={t("editor.placeholder")}
               style={{ WebkitUserSelect: "text", userSelect: "text", caretColor: "auto" }}
             />
             <div className="absolute right-3 top-3 flex gap-2">
@@ -2682,14 +2841,14 @@ const RichEditorPane = ({
                 type="button"
                 onClick={() => void handleMobileClipboardInput()}
               >
-                粘贴
+                  {t("editor.paste")}
               </button>
               <button
                 className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm"
                 type="button"
                 onClick={handleMobilePromptInput}
               >
-                输入
+                  {t("editor.typeInput")}
               </button>
             </div>
           </>
@@ -2699,9 +2858,9 @@ const RichEditorPane = ({
             onChange={(event) => handleMarkdownSourceChange(event.target.value)}
             readOnly={effectiveReadOnly}
             spellCheck={false}
-            aria-label="Markdown 源码"
+            aria-label={t("editor.markdownSourceAria")}
             className="block min-h-[300px] h-full w-full resize-none border-0 bg-slate-950 px-4 py-3 font-mono text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 sm:px-7"
-            placeholder="# 开始记录"
+            placeholder={`# ${t("editor.placeholder")}`}
           />
         ) : (
           <EditorContent editor={editor} />
@@ -2782,8 +2941,8 @@ const RichEditorPane = ({
           className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 z-30 h-12 w-12 rounded-full shadow-lg sm:hidden"
           size="icon"
           variant="solid"
-          title="编辑笔记"
-          aria-label="编辑笔记"
+          title={t("editor.editMemo")}
+          aria-label={t("editor.editMemo")}
           onClick={() => {
             if (onRequestMobileNativeEdit) {
               onRequestMobileNativeEdit();

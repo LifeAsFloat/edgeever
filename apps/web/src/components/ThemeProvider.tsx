@@ -2,11 +2,44 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 
 export type ThemePreference = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
+export const MERMAID_THEME_NAMES = [
+  "zinc-light",
+  "zinc-dark",
+  "tokyo-night",
+  "tokyo-night-storm",
+  "tokyo-night-light",
+  "catppuccin-mocha",
+  "catppuccin-latte",
+  "nord",
+  "nord-light",
+  "dracula",
+  "github-light",
+  "github-dark",
+  "solarized-light",
+  "solarized-dark",
+  "one-dark",
+] as const;
+export type MermaidThemeName = (typeof MERMAID_THEME_NAMES)[number];
+
+export const EDITOR_THEME_NAMES = [
+  "default",
+  "moyu-green",
+  "red-white",
+  "graphite-minimal",
+  "zen-whitespace",
+  "moyu-ticket",
+  "olive-journal",
+] as const;
+export type EditorThemeName = (typeof EDITOR_THEME_NAMES)[number];
 
 interface ThemeContextValue {
   preference: ThemePreference;
   resolvedTheme: ResolvedTheme;
   setPreference: (preference: ThemePreference) => void;
+  mermaidTheme: MermaidThemeName;
+  setMermaidTheme: (theme: MermaidThemeName) => void;
+  editorTheme: EditorThemeName;
+  setEditorTheme: (theme: EditorThemeName) => void;
 }
 
 interface ThemeProviderProps {
@@ -14,6 +47,8 @@ interface ThemeProviderProps {
 }
 
 const THEME_STORAGE_KEY = "edgeever.theme";
+const MERMAID_THEME_STORAGE_KEY = "edgeever.mermaid-theme";
+const EDITOR_THEME_STORAGE_KEY = "edgeever.editor-theme";
 const LIGHT_THEME_COLOR = "#f8fafc";
 const DARK_THEME_COLOR = "#0f172a";
 const ThemeContext = createContext<ThemeContextValue | null>(null);
@@ -31,6 +66,18 @@ export const getStoredThemePreference = (): ThemePreference => {
 
   const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
   return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+};
+
+export const getStoredMermaidTheme = (): MermaidThemeName => {
+  if (typeof window === "undefined") return "zinc-light";
+  const stored = window.localStorage.getItem(MERMAID_THEME_STORAGE_KEY);
+  return MERMAID_THEME_NAMES.includes(stored as MermaidThemeName) ? stored as MermaidThemeName : "zinc-light";
+};
+
+export const getStoredEditorTheme = (): EditorThemeName => {
+  if (typeof window === "undefined") return "default";
+  const stored = window.localStorage.getItem(EDITOR_THEME_STORAGE_KEY);
+  return EDITOR_THEME_NAMES.includes(stored as EditorThemeName) ? stored as EditorThemeName : "default";
 };
 
 const applyThemeToDocument = (preference: ThemePreference) => {
@@ -51,6 +98,8 @@ export const initializeTheme = () => {
 export const ThemeProvider = ({ children }: ThemeProviderProps) => {
   const [preference, setPreferenceState] = useState<ThemePreference>(getStoredThemePreference);
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(preference));
+  const [mermaidTheme, setMermaidThemeState] = useState<MermaidThemeName>(getStoredMermaidTheme);
+  const [editorTheme, setEditorThemeState] = useState<EditorThemeName>(getStoredEditorTheme);
 
   useEffect(() => {
     setResolvedTheme(applyThemeToDocument(preference));
@@ -71,8 +120,18 @@ export const ThemeProvider = ({ children }: ThemeProviderProps) => {
       preference,
       resolvedTheme,
       setPreference: (nextPreference: ThemePreference) => setPreferenceState(nextPreference),
+      mermaidTheme,
+      setMermaidTheme: (nextTheme: MermaidThemeName) => {
+        setMermaidThemeState(nextTheme);
+        window.localStorage.setItem(MERMAID_THEME_STORAGE_KEY, nextTheme);
+      },
+      editorTheme,
+      setEditorTheme: (nextTheme: EditorThemeName) => {
+        setEditorThemeState(nextTheme);
+        window.localStorage.setItem(EDITOR_THEME_STORAGE_KEY, nextTheme);
+      },
     }),
-    [preference, resolvedTheme]
+    [editorTheme, mermaidTheme, preference, resolvedTheme]
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
