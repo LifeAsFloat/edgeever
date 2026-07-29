@@ -2,7 +2,7 @@ import react from "@vitejs/plugin-react";
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 import { resolveAppVersion, resolveDeploymentMethod, resolveDeploymentTrigger, resolveReleaseTimestamp } from "./build-metadata";
 
@@ -57,6 +57,8 @@ const buildId = process.env.WORKERS_CI_COMMIT_SHA?.slice(0, 12)
   ?? "local";
 const gitDescription = readGitDescription();
 const appVersion = resolveAppVersion(readPackageVersion(), gitDescription);
+const OPTIONAL_CHUNK_WARNING_LIMIT_KB = 1_700;
+const TARGET_VENDOR_CHUNK_BYTES = 450 * 1024;
 const releaseTimestamp = resolveReleaseTimestamp(process.env.EDGE_EVER_RELEASED_AT) || readLatestReleaseCommitTimestamp();
 const deploymentTrigger = resolveDeploymentTrigger(
   process.env.EDGE_EVER_DEPLOYMENT_TRIGGER
@@ -70,9 +72,42 @@ const deploymentMethod = resolveDeploymentMethod(
         ? "github_actions"
         : undefined)
 );
+const isDesktopBuild = process.env.EDGE_EVER_DESKTOP_BUILD === "1";
+const developmentServiceWorkerReset: Plugin = {
+  name: "edgeever-development-service-worker-reset",
+  apply: "serve",
+  configureServer(server) {
+    server.middlewares.use((request, response, next) => {
+      if (request.url?.split("?")[0] !== "/sw.js") {
+        next();
+        return;
+      }
+
+      response.statusCode = 200;
+      response.setHeader("Content-Type", "application/javascript; charset=utf-8");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(`
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    const cacheNames = await caches.keys();
+    await Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName)));
+    await self.clients.claim();
+    await self.registration.unregister();
+    const clients = await self.clients.matchAll({ type: "window" });
+    await Promise.all(clients.map((client) => client.navigate(client.url)));
+  })());
+});
+`);
+    });
+  },
+};
 
 export default defineConfig({
   root: "apps/web",
+  // Packaged Electron apps load index.html via file://, so root-absolute
+  // asset URLs resolve to the filesystem root and leave a blank window.
+  base: isDesktopBuild ? "./" : "/",
   define: {
     __EDGEEVER_APP_VERSION__: JSON.stringify(appVersion),
     __EDGEEVER_BUILD_ID__: JSON.stringify(buildId),
@@ -82,6 +117,7 @@ export default defineConfig({
     __EDGEEVER_DEPLOYMENT_METHOD__: JSON.stringify(deploymentMethod),
   },
   plugins: [
+    developmentServiceWorkerReset,
     react(),
     VitePWA({
       registerType: "autoUpdate",
@@ -118,9 +154,64 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,woff2}"],
-        navigateFallback: "/index.html",
-        navigateFallbackDenylist: [/^\/api\//, /^\/mcp\//, /^\/mobile-edit\.html$/, /^\/note-print\.html/, /^\/tiptap-ime-test\.html$/],
+        cleanupOutdatedCaches: true,
+        additionalManifestEntries: [
+          {
+            revision: buildId,
+            url: `/index.html?edgeever-offline-shell=${encodeURIComponent(buildId)}`,
+          },
+        ],
+        globIgnores: [
+          "index.html",
+          "**/*beautiful-mermaid*.js",
+          "**/*mermaid.core-*.js",
+          "**/vendor-mermaid-*.js",
+          "**/*Diagram-*.js",
+        ],
+        navigateFallback: null,
+        navigationPreload: true,
         runtimeCaching: [
+          {
+            urlPattern: ({ request, url }) =>
+              request.mode === "navigate" &&
+              !["/mobile-edit.html", "/note-print.html", "/tiptap-ime-test.html"].includes(url.pathname),
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "edgeever-app-shell",
+              networkTimeoutSeconds: 5,
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+              precacheFallback: {
+                fallbackURL: `/index.html?edgeever-offline-shell=${encodeURIComponent(buildId)}`,
+              },
+            },
+          },
+          {
+            urlPattern: ({ url }) => /^\/api\/v1\/resources\/[^/]+\/blob$/.test(url.pathname),
+            handler: "CacheFirst",
+            options: {
+              cacheName: "edgeever-resource-blobs",
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+              expiration: {
+                maxEntries: 500,
+                maxAgeSeconds: 60 * 60 * 24 * 90,
+              },
+            },
+          },
+          {
+            urlPattern: ({ url }) => /\/assets\/(?:.*beautiful-mermaid|vendor-mermaid|.*mermaid\.core|.*Diagram-)/.test(url.pathname),
+            handler: "CacheFirst",
+            options: {
+              cacheName: "edgeever-optional-diagrams",
+              expiration: {
+                maxEntries: 120,
+                maxAgeSeconds: 60 * 60 * 24 * 30,
+              },
+            },
+          },
           {
             urlPattern: ({ url }) => url.pathname.startsWith("/api/") || url.pathname.startsWith("/mcp/"),
             handler: "NetworkOnly",
@@ -149,6 +240,18 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // ELK is distributed as one ~1.6 MiB module by beautiful-mermaid. It is
+    // loaded only when a diagram is rendered and is excluded from HTML
+    // modulepreload and PWA precache; verify-web-performance.mjs enforces
+    // those constraints for every chunk above Vite's default 500 KiB limit.
+    chunkSizeWarningLimit: OPTIONAL_CHUNK_WARNING_LIMIT_KB,
+    modulePreload: isDesktopBuild
+      ? false
+      : {
+          resolveDependencies: (_filename, dependencies) => dependencies.filter((dependency) =>
+            !/(?:vendor-code-highlight|vendor-(?:mermaid|D3|tiptap|prosemirror|floating)|ui-primitives)/.test(dependency),
+          ),
+        },
     rolldownOptions: {
       input: {
         app: fileURLToPath(new URL("./index.html", import.meta.url)),
@@ -159,6 +262,12 @@ export default defineConfig({
       output: {
         codeSplitting: {
           groups: [
+            {
+              name: "vendor-code-highlight",
+              test: /node_modules[\\/](?:lowlight|highlight\.js|@tiptap[\\/]extension-code-block-lowlight)[\\/]/,
+              priority: 50,
+              maxSize: TARGET_VENDOR_CHUNK_BYTES,
+            },
             {
               name: "vendor-react",
               test: /node_modules[\\/](react|react-dom|scheduler|react-router)[\\/]/,
@@ -238,16 +347,19 @@ export default defineConfig({
               name: "vendor-mermaid-layout",
               test: /[\\/](?:cytoscape(?:-[^\\/@]+)?|dagre-d3-es|graphlib|roughjs|khroma|@upsetjs[\\/]venn\.js)(?:@|[\\/])/,
               priority: 11,
+              maxSize: TARGET_VENDOR_CHUNK_BYTES,
             },
             {
               name: "vendor-mermaid-render",
               test: /[\\/](?:@mermaid-js[\\/](?:parser|tiny)|katex|dompurify|stylis|dayjs|@iconify[\\/]utils)(?:@|[\\/])/,
               priority: 11,
+              maxSize: TARGET_VENDOR_CHUNK_BYTES,
             },
             {
               name: "vendor-beautiful-mermaid",
               test: /[\\/](?:beautiful-mermaid|elkjs|entities)(?:@|[\\/])/,
               priority: 13,
+              maxSize: TARGET_VENDOR_CHUNK_BYTES,
             },
             {
               name: "ui-primitives",
@@ -257,9 +369,13 @@ export default defineConfig({
             {
               name: "vendor",
               // Keep Mermaid's internally lazy-loaded diagram modules out of the
-              // catch-all vendor chunk so they remain on-demand.
+              // catch-all vendor chunk so they remain on-demand. Entry-aware
+              // splitting also prevents dependencies used only by lazy settings,
+              // export, and template screens from leaking into the app entry.
               test: /^(?!.*(?:[\\/]mermaid@|node_modules[\\/]mermaid[\\/])).*node_modules[\\/]/,
               priority: 5,
+              entriesAware: true,
+              maxSize: TARGET_VENDOR_CHUNK_BYTES,
             },
           ],
         },

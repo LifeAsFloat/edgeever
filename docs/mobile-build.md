@@ -46,6 +46,12 @@ This produces `apps/mobile/android/app/build/outputs/apk/release/app-release.apk
 
 If the audited change range does not affect the mobile binary, the most recent compatible, verified APK may be attached again without rebuilding. Keep its original versioned filename and checksum, and state the source release explicitly; never rename an older binary to the current release version.
 
+The release workflow performs this audit automatically. Web-only releases use
+an Ubuntu planning job and copy the single verified `arm64-v8a` APK from the
+previous formal Release. The self-hosted Android runner is scheduled only when
+the audited range includes mobile runtime code, shared mobile packages,
+dependencies, native configuration, or Android build tooling.
+
 ### Recommended local Play build
 
 Routine Google Play bundles should be built on the release Mac instead of in
@@ -80,26 +86,18 @@ app unless the key reset has been completed in Play Console.
 
 Set `EDGE_EVER_ANDROID_ENV_FILE` to use a different secure environment file.
 
-### GitHub Actions fallback
+### Automated store delivery
 
-Run the workflow manually to build a signed Android App Bundle. The workflow
-uses the following GitHub Actions secrets:
+The GitHub Release workflow never builds or uploads a Play bundle. After a
+formal Release that contains mobile changes is published, use the separate
+store-delivery workflow. It builds a signed AAB from the immutable Release tag,
+preserves the AAB and R8 mapping as Actions artifacts, and uploads the bundle
+through EAS Submit. See [Mobile Store Delivery](store-delivery.md).
 
-```text
-ANDROID_KEYSTORE_BASE64
-ANDROID_KEYSTORE_PASSWORD
-ANDROID_KEY_ALIAS
-ANDROID_KEY_PASSWORD
-```
-
-The resulting app bundle is uploaded as `edgeever-android-release-aab`. Release
-builds enable R8 code minification and resource shrinking, and the matching
-deobfuscation file is uploaded as `edgeever-android-release-mapping`. Upload
-that `mapping.txt` alongside the same app bundle version in Google Play Console
-so production crash and ANR stack traces can be decoded correctly. The upload
-keystore is only used to prove ownership when uploading bundles; Google Play
-App Signing manages the app signing key delivered to users. Keep an encrypted
-backup of the upload keystore and its credentials outside the repository.
+The upload keystore is only used to prove ownership when uploading bundles;
+Google Play App Signing manages the app signing key delivered to users. Keep an
+encrypted backup of the upload keystore and its credentials outside the
+repository.
 
 ### iOS App Store build
 
@@ -116,11 +114,12 @@ bunx eas-cli build --platform ios --profile production
 
 The first command requires the Apple Account Holder to authenticate and may
 prompt for two-factor authentication. The production profile automatically
-increments the App Store build number. After the build has succeeded, submit
-the selected build with `bunx eas-cli submit --platform ios --profile
-production`, or configure `submit.production.ios.ascAppId` and use
-`--auto-submit` on subsequent releases. Apple credentials, App Store Connect
-API keys, certificates, and provisioning profiles must never be committed.
+increments the App Store build number. Routine delivery should use the separate
+store-delivery workflow, which builds from an immutable formal Release tag,
+uploads to App Store Connect, and submits that exact build to App Review.
+Approved builds are released automatically. Apple credentials, App Store
+Connect API keys, certificates, and provisioning profiles must never be
+committed.
 
 ## EAS
 

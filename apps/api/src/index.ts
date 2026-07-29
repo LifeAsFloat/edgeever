@@ -162,6 +162,7 @@ type MemoSummaryRow = {
   title: string | null;
   excerpt: string;
   content_text?: string | null;
+  content_markdown?: string | null;
   tags_json: string;
   is_pinned: number;
   is_archived: number;
@@ -439,7 +440,7 @@ const app = new Hono<{ Bindings: Bindings; Variables: { auth: AuthContext } }>()
 app.use(
   "/api/*",
   cors({
-    origin: ["http://127.0.0.1:5173", "http://localhost:5173"],
+    origin: ["http://127.0.0.1:5173", "http://localhost:5173", "null"],
     allowHeaders: ["Content-Type", "Authorization"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
@@ -449,7 +450,7 @@ app.use(
 app.use(
   "/mcp",
   cors({
-    origin: ["http://127.0.0.1:5173", "http://localhost:5173"],
+    origin: ["http://127.0.0.1:5173", "http://localhost:5173", "null"],
     allowHeaders: ["Content-Type", "Authorization"],
     allowMethods: ["GET", "POST", "OPTIONS"],
     credentials: true,
@@ -1228,6 +1229,30 @@ app.delete("/api/v1/notebooks/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+app.post("/api/v1/notebooks/:id/restore", async (c) => {
+  const denied = requireScopes(c, "write:notebooks");
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  const workspaceId = getWorkspaceId(c);
+  const actor = getAuditActor(c);
+  const current = await c.env.storage.db.prepare(
+    `SELECT id FROM notebooks WHERE id = ? AND workspace_id = ? AND is_deleted = 1`
+  ).bind(id, workspaceId).first<{ id: string }>();
+  if (!current) return notFound(c, "Deleted notebook not found");
+
+  const now = isoNow();
+  await c.env.storage.db.batch([
+    c.env.storage.db.prepare(
+      `UPDATE notebooks SET is_deleted = 0, deleted_at = NULL, updated_at = ? WHERE id = ? AND workspace_id = ?`
+    ).bind(now, id, workspaceId),
+    auditStatement(c.env.storage.db, actor.actorType, actor.actorId, "notebook.restore", "notebook", id, {}),
+  ]);
+  const notebook = await getNotebook(c.env.storage.db, workspaceId, id);
+  if (!notebook) return notFound(c, "Notebook not found after restore");
+  return c.json({ notebook });
+});
+
 app.get("/api/v1/tags", async (c) => {
   const denied = requireScopes(c, "read:tags");
 
@@ -1510,7 +1535,7 @@ app.get("/api/v1/memos", async (c) => {
            )
            SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
                   m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-                  mc.content_text
+                  mc.content_text, mc.content_markdown
            FROM search_matches s
            INNER JOIN memos m ON m.id = s.memo_id
            INNER JOIN memo_contents mc ON mc.memo_id = m.id
@@ -1563,7 +1588,7 @@ app.get("/api/v1/memos", async (c) => {
       c.env.storage.db.prepare(
         `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
                 m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-                mc.content_text
+                mc.content_text, mc.content_markdown
          FROM memos m
          INNER JOIN memo_contents mc ON mc.memo_id = m.id
          WHERE ${searchCursorConditions.join(" AND ")}
@@ -1592,7 +1617,7 @@ app.get("/api/v1/memos", async (c) => {
     c.env.storage.db.prepare(
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-              mc.content_text
+              mc.content_text, mc.content_markdown
        FROM memos m
        INNER JOIN memo_contents mc ON mc.memo_id = m.id
        WHERE ${cursorConditions.join(" AND ")}
@@ -4419,7 +4444,7 @@ const mapMemoSummary = (row: MemoSummaryRow): MemoSummary => ({
   id: row.id,
   notebookId: row.notebook_id,
   title: row.title,
-  excerpt: row.excerpt || createExcerpt(row.content_text ?? ""),
+  excerpt: row.excerpt || createExcerpt(row.content_text ?? "") || createExcerpt(docToText(markdownToDoc(row.content_markdown ?? ""))),
   tags: parseJsonArray(row.tags_json),
   isPinned: Boolean(row.is_pinned),
   isArchived: Boolean(row.is_archived),

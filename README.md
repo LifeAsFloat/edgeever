@@ -48,7 +48,7 @@ The public demo resets every Monday at 1:00 AM (China Standard Time) and restore
 - **Batch Operations & Flexible Sorting**: Easily merge or relocate multiple notes, with drag-and-drop notebook reordering.
 - **Offline Drafts & Queueing**: Draft and edit uninterrupted while offline; changes automatically sync once reconnected.
 - **Multi-Tenant Account Isolation**: Host multiple user accounts on a single instance with strictly partitioned spaces and clean admin account management.
-- **Everywhere You Need It**: Chrome/Edge Web Clipper published on Chrome Web Store; installable as a PWA; native Android app available on [Google Play](https://play.google.com/store/apps/details?id=org.edgeever.mobile), with APKs also downloadable from GitHub Releases; iOS app currently under App Store review; native desktop app development is planned with Electron and a Rust sidecar.
+- **Everywhere You Need It**: Chrome/Edge Web Clipper published on Chrome Web Store; installable as a PWA; native Android app available on [Google Play](https://play.google.com/store/apps/details?id=org.edgeever.mobile), with APKs also downloadable from GitHub Releases; iOS app currently under App Store review; native desktop builds use Electron and a Rust sidecar.
 
 ## Deployment
 
@@ -105,7 +105,7 @@ The Chrome/Edge web clipper is officially published. You can install it directly
 
 The Android app is now available on [Google Play](https://play.google.com/store/apps/details?id=org.edgeever.mobile), with signed APKs also available from [GitHub Releases](https://github.com/tianma-if/edgeever/releases). The iOS app has been submitted and is currently under App Store review.
 
-The native desktop app is planned to be built with Electron and a Rust sidecar.
+The native desktop app is built with Electron and a Rust sidecar. Development and unsigned installer instructions are available in [`apps/desktop/README.md`](apps/desktop/README.md); signed release artifacts are produced by the desktop CI workflow.
 
 ## Tech Stack
 
@@ -157,12 +157,16 @@ apps/web          Vite + React frontend, PWA, offline drafts, and sync queue
 apps/extension    Chrome/Edge Manifest V3 web clipper
 apps/api          Cloudflare Worker + Hono API, OpenAPI, MCP endpoint
 apps/mobile       Expo + React Native mobile app
+apps/desktop      Electron desktop shell, preload bridge, and native packaging
 apps/site         Astro official website, deployable independently
 packages/client   Shared API client for web and mobile apps
 packages/shared   Shared types, Zod schemas, TipTap / Markdown conversion
+crates/desktop-sidecar
+                   Rust sidecar for local SQLite, offline data, backups, and resources
 scripts           Wrangler wrapper, password hash, CLI, MCP stdio bridge, Evernote ENEX import
 migrations        D1 database migrations
-docs              OpenAPI schema, migration guides, and deployment docs
+docs              OpenAPI schema, architecture, migration, and deployment docs
+.github/workflows CI for web, mobile, desktop packaging, deployment, and releases
 wrangler.toml     Cloudflare Workers, Assets, D1, R2 configuration
 ```
 
