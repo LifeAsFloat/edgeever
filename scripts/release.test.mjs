@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildIssueBody,
   buildReleaseNotes,
+  buildReleaseTitle,
   nextVersion,
   parseReleaseArgs,
   reusedAssetMatches,
@@ -55,6 +56,11 @@ describe("release automation", () => {
     expect(() => nextVersion("1.6.50", "automatic")).toThrow("patch, minor, or major");
   });
 
+  test("uses the stable tag as the GitHub Release title", () => {
+    expect(buildReleaseTitle("v1.6.55")).toBe("v1.6.55");
+    expect(() => buildReleaseTitle("1.6.55")).toThrow("stable vX.Y.Z tag");
+  });
+
   test("requires an explicit version bump", () => {
     expect(() =>
       parseReleaseArgs([
@@ -70,22 +76,21 @@ describe("release automation", () => {
     ).toThrow("--bump must be patch, minor, or major");
   });
 
-  test("builds required bilingual release note structure with real newlines", () => {
+  test("builds concise user-facing bilingual release notes", () => {
     const notes = buildReleaseNotes({
       changesEn: ["Improve the release flow."],
       changesZh: ["优化发布流程。"],
       issueNumber: 126,
-      desktopRebuild: false,
-      mobileRebuild: false,
-      previousTag: "v1.6.50",
-      bump: "patch",
     });
     expect(notes).toContain("## Key Changes");
     expect(notes).toContain("Related Issue: #126");
     expect(notes).toContain("## 🇨🇳 中文说明 / Chinese Changelog");
     expect(notes).toContain("关联 Issue：#126");
-    expect(notes).toContain("Version bump: `patch`.");
-    expect(notes).toContain("版本递增级别：`patch`。");
+    expect(notes).not.toContain("## Verification");
+    expect(notes).not.toContain("## 验证");
+    expect(notes).not.toContain("bun run");
+    expect(notes).not.toContain("Version bump");
+    expect(notes).not.toContain("release plan");
     expect(notes).not.toContain("\\n");
   });
 
@@ -108,22 +113,27 @@ describe("release automation", () => {
     ).toBe(false);
   });
 
-  test("selects a reused DMG and derives its native version", () => {
+  test("selects the DMG matching the current Mac architecture", () => {
+    const assets = [
+      {
+        name: "EdgeEver-1.6.51-mac-arm64.dmg",
+        size: 10,
+        digest: "sha256:abc",
+      },
+      {
+        name: "EdgeEver-1.6.51-mac-x64.dmg",
+        size: 11,
+        digest: "sha256:def",
+      },
+    ];
     expect(
-      selectPublishedDmg([
-        {
-          name: "EdgeEver-1.6.51-mac-arm64.dmg",
-          size: 10,
-          digest: "sha256:abc",
-        },
-        {
-          name: "edgeever-android-v1.6.51-arm64-v8a.apk",
-          size: 10,
-          digest: "sha256:def",
-        },
-      ]),
+      selectPublishedDmg(assets, "arm64"),
     ).toMatchObject({
       asset: { name: "EdgeEver-1.6.51-mac-arm64.dmg" },
+      version: "1.6.51",
+    });
+    expect(selectPublishedDmg(assets, "x64")).toMatchObject({
+      asset: { name: "EdgeEver-1.6.51-mac-x64.dmg" },
       version: "1.6.51",
     });
   });

@@ -1,8 +1,8 @@
 # Release 发布指南
 
 EdgeEver 使用一条本地命令准备 Release。该命令会检查仓库、创建跟踪 Issue、
-更新版本、在 Draft Release 中准备并审计原生资产、正式发布 Release，并安装最终
-的 macOS DMG。
+更新版本、在 Draft Release 中准备并审计原生资产、正式发布 Release，并安装与
+维护者 Mac 架构匹配的最终 macOS DMG。
 
 该流程不执行移动端商店交付。Google Play 和 App Store Connect 交付是独立且
 需要显式触发的操作，详见[移动端商店交付](store-delivery.zh-CN.md)。
@@ -27,6 +27,9 @@ bun run release -- \
 
 如果一个 Release 包含多项改动，请成对重复传入 `--change-en` 和
 `--change-zh`。跟踪 Issue 需要多个 Label 时，可以重复传入 `--label`。
+公开 Release 说明只包含用户可感知的变化、影响以及必要的升级或迁移提醒。
+类型检查、构建命令、签名、公证和资产审计等技术细节保留在 GitHub Actions
+与关联跟踪 Issue 中，不再重复写入公开说明。
 
 `--bump` 为必填项，必须根据整个 Release 对用户和兼容性的影响选择：
 
@@ -54,9 +57,13 @@ GitHub 状态。`--skip-install` 会跳过发布后的 DMG 安装，仅适用于
 对应的原生展示版本。Android `versionCode` 和 iOS Build Number 继续作为独立、
 严格递增的商店构建标识。
 
-复用已验证的 DMG 或 APK 时，保留其原始文件名和原生版本。桌面端和 Android
-更新检查从各自在 Release 中的资产读取适用版本，而不是直接比较整体 GitHub
-tag，避免原生客户端因为仅涉及 Web 或 API 的 Release 反复提示无效更新。
+正式 Tag 及其对应的 GitHub Release 标题均统一使用 `vX.Y.Z`。
+
+复用已验证的 DMG 或 APK 时，保留其原始文件名和原生版本。每个正式 Release
+都同时包含独立的 macOS arm64 与 x64 DMG，以及按架构区分的更新 ZIP。桌面端
+和 Android 更新检查从各自在 Release 中的资产读取适用版本，而不是直接比较
+整体 GitHub tag，避免原生客户端因为仅涉及 Web 或 API 的 Release 反复提示
+无效更新。
 
 ## 自动化流程
 
@@ -68,13 +75,14 @@ tag，避免原生客户端因为仅涉及 Web 或 API 的 Release 反复提示�
    可以复用，并且只更新受影响原生端的版本。
 4. 创建双语跟踪 Issue，将版本变更提交并推送到 `main`，然后创建带双语说明的
    Draft Release。
-5. 并行触发桌面端和 Android 资产工作流，等待两者完成，并在正式发布前检查
-   文件名、大小和校验和。
+5. 并行触发桌面端和 Android 资产工作流。桌面端工作流分别在匹配的原生 Runner
+   上构建 arm64 与 x64 包，再合并自动更新元数据；正式发布前检查文件名、大小
+   和校验和。
 6. 正式发布 Release，且只等待必要的桌面端和 Android 发布后资产审计。
 7. 输出 Demo 部署任务或工作流链接。Demo 在后台继续部署，不再延迟 Release
    完成。
-8. 回链并关闭跟踪 Issue，下载最终 DMG，验证校验和与签名，覆盖
-   `/Applications/EdgeEver.app` 并启动。
+8. 回链并关闭跟踪 Issue，下载与维护者 Mac 架构匹配的最终 DMG，验证校验和与
+   签名，覆盖 `/Applications/EdgeEver.app` 并启动。
 
 Release 流程不会构建 Play AAB、启动 EAS iOS Build，也不会上传到移动端商店。
 

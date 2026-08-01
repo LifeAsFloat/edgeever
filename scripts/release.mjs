@@ -161,6 +161,13 @@ export const nextVersion = (version, bump) => {
   return `${major}.${minor}.${patch + 1}`;
 };
 
+export const buildReleaseTitle = (tag) => {
+  if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
+    throw new Error(`Expected a stable vX.Y.Z tag, received: ${tag}`);
+  }
+  return tag;
+};
+
 export const buildIssueBody = ({ changesEn, changesZh }) => [
   "## Summary",
   "",
@@ -173,7 +180,7 @@ export const buildIssueBody = ({ changesEn, changesZh }) => [
   "## Acceptance criteria",
   "",
   "- Required type checks, Web build, and native release planning tests pass.",
-  "- The Draft Release contains an audited macOS arm64 DMG and Android arm64 APK.",
+  "- The Draft Release contains audited macOS arm64 and x64 DMGs and an Android arm64 APK.",
   "- Post-publication native asset audits pass.",
 ].join("\n");
 
@@ -181,30 +188,12 @@ export const buildReleaseNotes = ({
   changesEn,
   changesZh,
   issueNumber,
-  desktopRebuild,
-  mobileRebuild,
-  previousTag,
-  bump,
 }) => [
   "## Key Changes",
   "",
   ...changesEn.map((change) => `- ${change}`),
   "",
   `Related Issue: #${issueNumber}`,
-  "",
-  "## Verification",
-  "",
-  "- `bun run typecheck`",
-  "- `bun run typecheck:mobile`",
-  "- `bun run build:web`",
-  "- Native release planning and asset audit tests.",
-  `- Version bump: \`${bump}\`.`,
-  desktopRebuild
-    ? "- Desktop release plan: rebuild, sign, notarize, and verify a new macOS arm64 DMG."
-    : `- Desktop release plan: reuse the verified assets from ${previousTag} with their original filenames and checksums.`,
-  mobileRebuild
-    ? "- Android release plan: rebuild and verify a signed arm64 APK."
-    : `- Android release plan: reuse the verified APK from ${previousTag} with its original filename and checksum.`,
   "",
   "## 🇨🇳 中文说明 / Chinese Changelog",
   "",
@@ -213,20 +202,6 @@ export const buildReleaseNotes = ({
   ...changesZh.map((change) => `- ${change}`),
   "",
   `关联 Issue：#${issueNumber}`,
-  "",
-  "## 验证",
-  "",
-  "- `bun run typecheck`",
-  "- `bun run typecheck:mobile`",
-  "- `bun run build:web`",
-  "- 原生 Release 规划与资产审计测试。",
-  `- 版本递增级别：\`${bump}\`。`,
-  desktopRebuild
-    ? "- 桌面端 Release 计划：重新构建、签名、公证并验证新的 macOS arm64 DMG。"
-    : `- 桌面端 Release 计划：复用 ${previousTag} 已验证资产，并保留原始文件名与校验和。`,
-  mobileRebuild
-    ? "- Android Release 计划：重新构建并验证签名 arm64 APK。"
-    : `- Android Release 计划：复用 ${previousTag} 已验证 APK，并保留原始文件名与校验和。`,
   "",
 ].join("\n");
 
@@ -242,14 +217,17 @@ export const reusedAssetMatches = (previousAssets, currentAssets, name) => {
   );
 };
 
-export const selectPublishedDmg = (assets) => {
+export const selectPublishedDmg = (assets, arch = process.arch) => {
+  if (!["arm64", "x64"].includes(arch)) {
+    throw new Error(`Unsupported macOS architecture for installation: ${arch}.`);
+  }
   const matches = assets.filter((asset) =>
-    /^EdgeEver-(.+)-mac-arm64\.dmg$/.test(asset.name)
+    new RegExp(`^EdgeEver-(.+)-mac-${arch}\\.dmg$`).test(asset.name)
   );
   if (matches.length !== 1) {
-    throw new Error(`Expected exactly one macOS arm64 DMG, found ${matches.length}.`);
+    throw new Error(`Expected exactly one macOS ${arch} DMG, found ${matches.length}.`);
   }
-  const version = /^EdgeEver-(.+)-mac-arm64\.dmg$/.exec(matches[0].name)?.[1];
+  const version = new RegExp(`^EdgeEver-(.+)-mac-${arch}\\.dmg$`).exec(matches[0].name)?.[1];
   if (!version || !matches[0].digest?.startsWith("sha256:")) {
     throw new Error("Published DMG is missing its version or SHA-256 digest.");
   }
@@ -517,11 +495,11 @@ const assertDraftAssets = ({
     const previousDesktopNames = previousAssets
       .map((asset) => asset.name)
       .filter((name) =>
-        /^EdgeEver-.*-mac-arm64\.dmg(?:\.blockmap)?$/.test(name) ||
+        /^EdgeEver-.*-mac-(?:arm64|x64)\.(?:dmg|zip)(?:\.blockmap)?$/.test(name) ||
         name === "latest-mac.yml"
       );
     if (
-      previousDesktopNames.length !== 3 ||
+      previousDesktopNames.length !== 9 ||
       !previousDesktopNames.every((name) =>
         reusedAssetMatches(previousAssets, assets, name)
       )
@@ -689,8 +667,8 @@ const releaseMain = async (options) => {
       `package.json version ${rootPackage.version} must match ${previousVersion}, or ${expectedNextVersion} with a resumable Draft.`,
     );
   }
-  const nextVersion = resumedDraft ? rootPackage.version : expectedNextVersion;
-  const tag = `v${nextVersion}`;
+  const releaseVersion = resumedDraft ? rootPackage.version : expectedNextVersion;
+  const tag = `v${releaseVersion}`;
   const changedFiles = changedFilesBetween(previousTag, headShaBeforeRelease);
   if (changedFiles.length === 0) {
     throw new Error(`There are no committed changes after ${previousTag}.`);
@@ -707,10 +685,6 @@ const releaseMain = async (options) => {
       changesEn: options.changesEn,
       changesZh: options.changesZh,
       issueNumber: 0,
-      desktopRebuild: desktopPlan.rebuild,
-      mobileRebuild: mobilePlan.rebuild,
-      previousTag,
-      bump: options.bump,
     }));
     return;
   }
@@ -747,7 +721,7 @@ const releaseMain = async (options) => {
     console.log(`[release] created Issue #${issueNumber}: ${issueUrl}`);
 
     const versionPaths = updateReleaseVersions({
-      nextVersion,
+      nextVersion: releaseVersion,
       desktopRebuild: desktopPlan.rebuild,
       mobileRebuild: mobilePlan.rebuild,
     });
@@ -761,10 +735,6 @@ const releaseMain = async (options) => {
       changesEn: options.changesEn,
       changesZh: options.changesZh,
       issueNumber,
-      desktopRebuild: desktopPlan.rebuild,
-      mobileRebuild: mobilePlan.rebuild,
-      previousTag,
-      bump: options.bump,
     });
     const draftUrl = run("gh", [
       "release",
@@ -775,7 +745,7 @@ const releaseMain = async (options) => {
       "--target",
       releaseSha,
       "--title",
-      tag,
+      buildReleaseTitle(tag),
       "--draft",
       "--notes",
       notes,
@@ -829,7 +799,7 @@ const releaseMain = async (options) => {
     assets: draft.assets,
     previousAssets: latestRelease.assets,
     tag,
-    version: nextVersion,
+    version: releaseVersion,
     desktopRebuild: desktopPlan.rebuild,
     mobileRebuild: mobilePlan.rebuild,
   });

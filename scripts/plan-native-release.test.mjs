@@ -19,6 +19,8 @@ describe("native release planning", () => {
       "packages/shared/src/index.ts",
       "bun.lock",
       "scripts/build-android-local.sh",
+      "scripts/verify-android-apk-signature.mjs",
+      ".github/workflows/mobile-build.yml",
     ];
     expect(planNativeRelease("mobile", changedFiles)).toEqual({
       rebuild: true,
@@ -31,6 +33,18 @@ describe("native release planning", () => {
       "apps/web/src/app/App.tsx",
       "apps/desktop/src/main/index.mjs",
       "packages/shared/src/index.ts",
+    ];
+    expect(planNativeRelease("desktop", changedFiles)).toEqual({
+      rebuild: true,
+      relevantChanges: changedFiles,
+    });
+  });
+
+  test("rebuilds desktop when its architecture packaging pipeline changes", () => {
+    const changedFiles = [
+      ".github/workflows/desktop-build.yml",
+      "scripts/create-mac-update-metadata.mjs",
+      "scripts/run-desktop-builder.mjs",
     ];
     expect(planNativeRelease("desktop", changedFiles)).toEqual({
       rebuild: true,

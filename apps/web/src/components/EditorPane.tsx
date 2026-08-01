@@ -66,6 +66,7 @@ import { EditorOutline } from "./EditorOutline";
 import { WeChatIcon } from "./WeChatIcon";
 import { ThemeToggle } from "./ThemeToggle";
 import { useTheme } from "./ThemeProvider";
+import { sanitizeAndScopeCss } from "@/lib/css-sandbox";
 import { RevisionHistoryDialog } from "./dialogs/RevisionHistoryDialog";
 import { api } from "@/lib/api";
 import { isDesktopResourceRuntime, stageDesktopResource, toDesktopResourceUrl } from "@/lib/desktop-resources";
@@ -110,6 +111,8 @@ import { RELEASE_STATUS_EVENT } from "@/lib/release-notice";
 import { downloadMarkdownFile } from "@/lib/note-markdown-export";
 import { openNotePrintPreview, serializeNoteDocumentForPrint } from "@/lib/note-print";
 import { isBrowserOffline } from "@/lib/network-status";
+import { shouldOpenEditorLink } from "@/lib/editor-link-click";
+import { processFilesSequentially } from "@/lib/file-batch";
 
 const SUPPORTED_PASTE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
 const MOBILE_EDITOR_QUERY = "(max-width: 639px)";
@@ -1159,7 +1162,7 @@ const RichEditorPane = ({
   onRequestMobileNativeEdit,
 }: RichEditorPaneProps) => {
   const { t, i18n } = useTranslation();
-  const { customEditorTheme, editorTheme } = useTheme();
+  const { customEditorTheme, editorTheme, resolvedTheme } = useTheme();
   const queryClient = useQueryClient();
   const isSelectionMode = Boolean(selectionActionBar);
   const [title, setTitle] = useState("");
@@ -1341,77 +1344,84 @@ const RichEditorPane = ({
     void (async () => {
       setImageUploadState("uploading");
 
-      try {
-        for (const file of files) {
-          const isImage = SUPPORTED_PASTE_IMAGE_TYPES.has(file.type);
-          const shouldCompress = isImage && imageCompressionEnabledRef.current;
-          setImageUploadState(shouldCompress ? "compressing" : "uploading");
-          const uploadFile = shouldCompress ? (await compressImageForUpload(file)).file : file;
+      const results = await processFilesSequentially(files, async (file) => {
+        const isImage = SUPPORTED_PASTE_IMAGE_TYPES.has(file.type);
+        const shouldCompress = isImage && imageCompressionEnabledRef.current;
+        setImageUploadState(shouldCompress ? "compressing" : "uploading");
+        const uploadFile = shouldCompress ? (await compressImageForUpload(file)).file : file;
 
-          setImageUploadState("uploading");
-          let resource: { kind: "image" | "attachment"; filename: string | null; url: string };
-          try {
-            const uploadedResource = (await repository.uploadMemoResource(targetMemoId, uploadFile)).resource;
-            resource = { ...uploadedResource, url: toDesktopResourceUrl(uploadedResource.url) };
-          } catch (error) {
-            if (!isDesktopResourceRuntime()) throw error;
-            const staged = await stageDesktopResource(targetMemoId, uploadFile);
-            if (!staged) throw error;
-            resource = {
-              kind: isImage ? "image" : "attachment",
-              filename: uploadFile.name,
-              url: `edgeever-staged://${staged.id}`,
-            };
-          }
-          void queryClient.invalidateQueries({ queryKey: ["resources"] });
+        setImageUploadState("uploading");
+        let resource: { kind: "image" | "attachment"; filename: string | null; url: string };
+        try {
+          const uploadedResource = (await repository.uploadMemoResource(targetMemoId, uploadFile)).resource;
+          resource = { ...uploadedResource, url: toDesktopResourceUrl(uploadedResource.url) };
+        } catch (error) {
+          if (!isDesktopResourceRuntime()) throw error;
+          const staged = await stageDesktopResource(targetMemoId, uploadFile);
+          if (!staged) throw error;
+          resource = {
+            kind: isImage ? "image" : "attachment",
+            filename: uploadFile.name,
+            url: `edgeever-staged://${staged.id}`,
+          };
+        }
+        return resource;
+      });
 
-          const activeEditor = editorRef.current;
-          if (memoRef.current?.id !== targetMemoId || !isEditorReady(activeEditor)) {
-            setImageUploadState("idle");
-            return;
-          }
+      const successfulResults = results.filter((result) => result.status === "fulfilled");
+      if (successfulResults.length > 0) {
+        void queryClient.invalidateQueries({ queryKey: ["resources"] });
+      }
 
-          if (resource.kind === "image") {
-            activeEditor
-              .chain()
-              .focus()
-              .setImage({
+      const activeEditor = editorRef.current;
+      if (memoRef.current?.id !== targetMemoId || !isEditorReady(activeEditor)) {
+        setImageUploadState("idle");
+        return;
+      }
+
+      const content = successfulResults.map(({ file, value: resource }) =>
+        resource.kind === "image"
+          ? {
+              type: "image",
+              attrs: {
                 src: resource.url,
                 alt: file.name,
                 title: file.name,
                 width: DEFAULT_IMAGE_WIDTH_PERCENT,
-              })
-              .run();
-          } else {
-            activeEditor
-              .chain()
-              .focus()
-              .insertContent({
-                type: "paragraph",
-                content: [{
-                  type: "text",
-                  text: t("editor.attachmentLabel", { filename: resource.filename || file.name }),
-                  marks: [{
-                    type: "link",
-                    attrs: { href: resource.url, target: "_blank", class: "edgeever-attachment-link" },
-                  }],
+              },
+            }
+          : {
+              type: "paragraph",
+              content: [{
+                type: "text",
+                text: t("editor.attachmentLabel", { filename: resource.filename || file.name }),
+                marks: [{
+                  type: "link",
+                  attrs: { href: resource.url, target: "_blank", class: "edgeever-attachment-link" },
                 }],
-              })
-              .run();
-          }
-        }
+              }],
+            }
+      );
 
-        setImageUploadState("idle");
-      } catch {
+      if (content.length > 0) {
+        activeEditor.chain().focus().insertContent(content).run();
+      }
+
+      if (results.some((result) => result.status === "rejected")) {
         setImageUploadState("error");
         window.setTimeout(() => setImageUploadState("idle"), 2200);
+      } else {
+        setImageUploadState("idle");
       }
     })();
   }, [queryClient, repository, t]);
 
   const editor = useEditor({
     extensions: [
-      StarterKit.configure({ codeBlock: false }),
+      StarterKit.configure({
+        codeBlock: false,
+        link: { openOnClick: false },
+      }),
       EdgeEverCodeBlock.configure({ lowlight: codeBlockLowlight, defaultLanguage: "plaintext" }),
       ThemeBlock,
       ResizableImage.configure({
@@ -1465,14 +1475,19 @@ const RichEditorPane = ({
         return true;
       },
       handleClick: (_view, _pos, event) => {
-        const target = event.target instanceof HTMLElement ? event.target.closest("a[href^='#memo=']") : null;
-        const memoId = parseMemoLinkHref(target?.getAttribute("href"));
-        if (!memoId || !onOpenMemo) {
+        const target = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href]") : null;
+        if (!target || !shouldOpenEditorLink(event, _view.editable)) {
           return false;
         }
 
+        const href = target.getAttribute("href");
+        const memoId = parseMemoLinkHref(href);
         event.preventDefault();
-        onOpenMemo(memoId);
+        if (memoId) {
+          onOpenMemo?.(memoId);
+        } else if (href) {
+          window.open(target.href, "_blank", "noopener,noreferrer");
+        }
         return true;
       },
       handlePaste: (_view, event) => {
@@ -3187,20 +3202,38 @@ const RichEditorPane = ({
 
       <div
         ref={setEditorScrollContainerRef}
-        data-editor-theme={editorTheme}
-        style={editorTheme === "custom" ? {
-          "--editor-theme-bg": customEditorTheme.background,
-          "--editor-theme-text": customEditorTheme.text,
-          "--editor-theme-heading": customEditorTheme.heading,
-          "--editor-theme-accent": customEditorTheme.accent,
-          "--editor-theme-soft": customEditorTheme.soft,
-          "--editor-theme-border": customEditorTheme.border,
-        } as CSSProperties : undefined}
+        data-editor-theme={
+          editorTheme === "default" || editorTheme === "minimal-emerald" || editorTheme === "outline-emerald"
+            ? editorTheme
+            : "custom"
+        }
+        style={
+          editorTheme !== "default" && editorTheme !== "minimal-emerald" && editorTheme !== "outline-emerald"
+            ? {
+                "--editor-theme-bg": (resolvedTheme === "dark" ? customEditorTheme.dark : customEditorTheme.light).background,
+                "--editor-theme-text": (resolvedTheme === "dark" ? customEditorTheme.dark : customEditorTheme.light).text,
+                "--editor-theme-heading": (resolvedTheme === "dark" ? customEditorTheme.dark : customEditorTheme.light).heading,
+                "--editor-theme-accent": (resolvedTheme === "dark" ? customEditorTheme.dark : customEditorTheme.light).accent,
+                "--editor-theme-soft": (resolvedTheme === "dark" ? customEditorTheme.dark : customEditorTheme.light).soft,
+                "--editor-theme-border": (resolvedTheme === "dark" ? customEditorTheme.dark : customEditorTheme.light).border,
+              } as CSSProperties
+            : undefined
+        }
         className={cn(
           "edgeever-editor relative min-h-0 flex-1 bg-white",
           useMobilePlainTextEditor ? "overflow-visible" : "overflow-y-auto"
         )}
       >
+        {editorTheme !== "default" &&
+          editorTheme !== "minimal-emerald" &&
+          editorTheme !== "outline-emerald" &&
+          customEditorTheme.customCss && (
+            <style
+              data-theme-custom-css
+              data-original-css={customEditorTheme.customCss}
+              dangerouslySetInnerHTML={{ __html: sanitizeAndScopeCss(customEditorTheme.customCss) }}
+            />
+          )}
         <div
           className={cn(
             "flex min-h-full items-start gap-8 px-6 py-6 sm:px-10 transition-all duration-200",

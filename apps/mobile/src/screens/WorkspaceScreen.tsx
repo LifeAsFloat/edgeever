@@ -83,12 +83,14 @@ import {
 import { useMobileLocale } from "../lib/mobile-locale";
 import { useSession } from "../lib/session";
 import {
+  deleteMobileSyncQueueItem,
   getMobileSyncRetryDelay,
   listMobileSyncQueueItems,
   loadMobileSyncQueueSummary,
   queueMobileMemoCreate,
   queueMobileMemoUpdate,
   syncMobileQueuedChanges,
+  type MobileSyncQueueItem,
 } from "../lib/sync-queue";
 import {
   createMobileDataScope,
@@ -106,12 +108,22 @@ import { AccountSecurityPanel } from "./AccountSecurityModal";
 import { beginEditorStartup, markStartup, recordEditorStartup } from "../lib/startup-performance";
 import { prepareUploadAsset } from "../lib/mobile-image-upload";
 import EditorRuntimePrewarm from "../components/EditorRuntimePrewarm";
+import MobileWebClipCapture from "../components/MobileWebClipCapture";
 import { showEdgeEverKeyboard } from "../../modules/edgeever-keyboard";
 import LocalTiptapEditor, { type LocalTiptapEditorRef } from "../components/LocalTiptapEditor";
 import { resolveMobileThemeStyles, useMobileTheme, type MobileResolvedTheme } from "../lib/mobile-theme";
 import { useMobileUpdate } from "../lib/mobile-update";
 import { MobileMermaidDiagram, MobileMermaidProvider } from "../components/MobileMermaid";
 import { getMobileMarkdownFenceLanguage, trimMobileMarkdownFenceContent } from "../lib/mobile-mermaid";
+import {
+  buildMobileWebClipDraft,
+  buildMobileWebClipDraftFromRenderedPage,
+  getSharedWebUrl,
+  isWeChatArticleUrl,
+  type MobileRenderedWebPage,
+  type MobileSharedPayload,
+  type MobileWebClipDraft,
+} from "../lib/mobile-web-clip";
 
 const ALL_NOTES_ID = "all";
 const DEFAULT_MEMO_TITLE = "无标题笔记";
@@ -145,7 +157,7 @@ const MOBILE_LOCALE_OPTIONS: Array<{ label: string; value: MobileLocalePreferenc
   { label: "English", value: "en-US" },
 ];
 type MobileView = "notes" | "settings";
-type SettingsTab = "general" | "account";
+type SettingsTab = "general" | "account" | "system";
 type MemoView = "notebook" | "trash";
 type NotebookOption = {
   notebook: Notebook;
@@ -167,7 +179,13 @@ type RichEditingSession = {
 };
 type MobileMemoUpdateMutation = UseMutationResult<MemoDetail, Error, { memo: MemoDetail; payload: MobileMemoUpdatePayload }>;
 
-export const WorkspaceScreen = () => {
+export const WorkspaceScreen = ({
+  incomingSharePayloads = [],
+  onIncomingShareHandled,
+}: {
+  incomingSharePayloads?: MobileSharedPayload[];
+  onIncomingShareHandled?: () => void;
+}) => {
   const { resolvedTheme } = useMobileTheme();
   const { preference: localePreference, setPreference: setLocalePreference } = useMobileLocale();
   refreshWorkspaceThemeStyles(resolvedTheme);
@@ -187,6 +205,9 @@ export const WorkspaceScreen = () => {
   const [selectedMemoId, setSelectedMemoId] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [incomingClipDraft, setIncomingClipDraft] = useState<MobileWebClipDraft | null>(null);
+  const [incomingClipCaptureUrl, setIncomingClipCaptureUrl] = useState<string | null>(null);
+  const [isImportingShare, setIsImportingShare] = useState(false);
   const [notesActionsOpen, setNotesActionsOpen] = useState(false);
   const [notebookPickerOpen, setNotebookPickerOpen] = useState(false);
   const [richEditingSession, setRichEditingSession] = useState<RichEditingSession | null>(null);
@@ -204,7 +225,18 @@ export const WorkspaceScreen = () => {
   const autoSyncRequestedRef = useRef(false);
   const autoSyncRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const memoDraftPrefetchRef = useRef(new Map<string, Promise<MobileMemoDraft | null>>());
+  const processedShareUrlRef = useRef<string | null>(null);
+  const onIncomingShareHandledRef = useRef(onIncomingShareHandled);
+  onIncomingShareHandledRef.current = onIncomingShareHandled;
+  const [syncQueueItems, setSyncQueueItems] = useState<MobileSyncQueueItem[]>([]);
   const debouncedSearchText = useDebouncedValue(searchText.trim(), 250);
+  const incomingShareUrl = useMemo(() => getSharedWebUrl(incomingSharePayloads), [incomingSharePayloads]);
+
+  const refreshSyncQueueItems = useCallback(async () => {
+    const items = await listMobileSyncQueueItems(syncQueueScope);
+    setSyncQueueItems(items);
+    return items;
+  }, [syncQueueScope]);
 
   const notebooksQuery = useQuery({
     queryKey: ["mobile", "notebooks"],
@@ -489,16 +521,34 @@ export const WorkspaceScreen = () => {
 
   const openRichEditor = useCallback(async (memo: MemoDetail) => {
     beginEditorStartup();
-    const draft = await loadMemoDraft(memo.id);
+    let editingMemo = memo;
+    const queuedItem = (await listMobileSyncQueueItems(syncQueueScope)).find((item) => item.memoId === memo.id);
+
+    if (!queuedItem && client && !memo.id.startsWith("local:")) {
+      try {
+        const response = await client.getMemo(memo.id);
+        editingMemo = response.memo;
+        await upsertLocalMemo(dataScope, editingMemo);
+        queryClient.setQueryData(["mobile", "memo", "notebook", editingMemo.id], { memo: editingMemo });
+        queryClient.setQueryData(["mobile", "memo", "trash", editingMemo.id], { memo: editingMemo });
+      } catch {
+        // The local mirror remains editable while offline.
+      }
+    }
+
+    const draft = await loadMemoDraft(editingMemo.id);
     memoDraftPrefetchRef.current.delete(memo.id);
-    setRichEditingSession({ draft, memo });
-  }, [loadMemoDraft]);
+    setRichEditingSession({ draft, memo: editingMemo });
+  }, [client, dataScope, loadMemoDraft, queryClient, syncQueueScope]);
 
   const memos = useMemo(() => memosQuery.data?.pages.flatMap((page) => page.memos) ?? [], [memosQuery.data]);
   const searchResults = useMemo(() => searchQuery.data?.pages.flatMap((page) => page.memos) ?? [], [searchQuery.data]);
   const searchActive = searchText.trim().length > 0;
   const visibleMemos = searchActive ? searchResults : memos;
   const selectedMemo = memoDetailQuery.data?.memo ?? null;
+  const selectedMemoSyncStatus = selectedMemo
+    ? syncQueueItems.find((item) => item.memoId === selectedMemo.id)?.status ?? null
+    : null;
   const isRefreshing = notebooksQuery.isFetching || memosQuery.isFetching || searchQuery.isFetching || memoDetailQuery.isFetching;
   const selectedMemoIdList = Array.from(selectedMemoIds);
   const selectedMemos = visibleMemos.filter((memo) => selectedMemoIds.has(memo.id));
@@ -515,8 +565,109 @@ export const WorkspaceScreen = () => {
   const canCreateMemo = memoView !== "trash" && Boolean(createMemoNotebookId);
   const openCreateMemo = () => {
     beginEditorStartup();
+    setIncomingClipDraft(null);
     setCreateOpen(true);
   };
+
+  const openIncomingClipDraft = useCallback((draft: MobileWebClipDraft) => {
+    beginEditorStartup();
+    setIncomingClipDraft(draft);
+    setActiveView("notes");
+    setMemoView("notebook");
+    setCreateOpen(true);
+  }, []);
+
+  const finishIncomingShare = useCallback(() => {
+    setIncomingClipCaptureUrl(null);
+    setIsImportingShare(false);
+    onIncomingShareHandledRef.current?.();
+  }, []);
+
+  const handleRenderedClipCaptured = useCallback((page: MobileRenderedWebPage) => {
+    if (!incomingClipCaptureUrl) return;
+    openIncomingClipDraft(
+      buildMobileWebClipDraftFromRenderedPage(incomingClipCaptureUrl, page),
+    );
+    finishIncomingShare();
+  }, [finishIncomingShare, incomingClipCaptureUrl, openIncomingClipDraft]);
+
+  const handleRenderedClipFailed = useCallback((message: string) => {
+    const sourceUrl = incomingClipCaptureUrl;
+    if (!sourceUrl) return;
+    setIncomingClipCaptureUrl(null);
+    void buildMobileWebClipDraft(sourceUrl)
+      .then((draft) => {
+        openIncomingClipDraft(draft);
+        Alert.alert(
+          "正文剪藏失败",
+          `${message} 已保留文章链接，你可以稍后重新分享重试。`,
+        );
+      })
+      .finally(finishIncomingShare);
+  }, [finishIncomingShare, incomingClipCaptureUrl, openIncomingClipDraft]);
+
+  useEffect(() => {
+    const sourceUrl = incomingShareUrl;
+    if (!sourceUrl) {
+      if (incomingSharePayloads.length > 0 && processedShareUrlRef.current !== "invalid-share") {
+        processedShareUrlRef.current = "invalid-share";
+        Alert.alert("无法剪藏", "分享内容里没有可识别的网页链接。");
+        onIncomingShareHandledRef.current?.();
+        return;
+      }
+      processedShareUrlRef.current = null;
+      return;
+    }
+    if (processedShareUrlRef.current === sourceUrl) {
+      return;
+    }
+    if (notebooks.length === 0) {
+      if (notebooksQuery.isSuccess) {
+        processedShareUrlRef.current = sourceUrl;
+        Alert.alert("无法保存剪藏", "请先在 EdgeEver 中创建一个笔记本。");
+        onIncomingShareHandledRef.current?.();
+      }
+      return;
+    }
+
+    let active = true;
+    processedShareUrlRef.current = sourceUrl;
+    setIsImportingShare(true);
+    if (isWeChatArticleUrl(sourceUrl)) {
+      setIncomingClipCaptureUrl(sourceUrl);
+      return () => {
+        active = false;
+      };
+    }
+    void buildMobileWebClipDraft(sourceUrl)
+      .then((draft) => {
+        if (!active) {
+          return;
+        }
+        openIncomingClipDraft(draft);
+      })
+      .catch(() => {
+        if (active) {
+          Alert.alert("剪藏失败", "无法读取分享的网页，请稍后重试。");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsImportingShare(false);
+          onIncomingShareHandledRef.current?.();
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    incomingSharePayloads.length,
+    incomingShareUrl,
+    notebooks.length,
+    notebooksQuery.isSuccess,
+    openIncomingClipDraft,
+  ]);
 
   useEffect(() => {
     if (selectedMemo && !selectedMemo.isDeleted) {
@@ -531,7 +682,7 @@ export const WorkspaceScreen = () => {
   useEffect(() => {
     let mounted = true;
 
-    listMobileSyncQueueItems(syncQueueScope).then((items) => {
+    refreshSyncQueueItems().then((items) => {
       if (!mounted) {
         return;
       }
@@ -548,7 +699,7 @@ export const WorkspaceScreen = () => {
     return () => {
       mounted = false;
     };
-  }, [queryClient, syncQueueScope]);
+  }, [queryClient, refreshSyncQueueItems]);
 
   useEffect(() => {
     let mounted = true;
@@ -646,6 +797,7 @@ export const WorkspaceScreen = () => {
         notebookId: optimisticMemo.notebookId,
         tags: optimisticMemo.tags,
       });
+      await refreshSyncQueueItems();
 
       return optimisticMemo;
     },
@@ -751,6 +903,50 @@ export const WorkspaceScreen = () => {
     ]);
   };
 
+  const handleMemoSyncConflict = (memo: MemoDetail) => {
+    Alert.alert(
+      "同步冲突",
+      "云端笔记已在其他设备更新，本地修改没有覆盖云端。你可以查看版本历史，或放弃本地修改并使用云端版本。",
+      [
+        { text: "取消", style: "cancel" },
+        { text: "查看历史", onPress: () => setRevisionMemo(memo) },
+        {
+          text: "使用云端版本",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              if (!client) {
+                return;
+              }
+
+              try {
+                const conflict = (await listMobileSyncQueueItems(syncQueueScope))
+                  .find((item) => item.memoId === memo.id && item.status === "conflict");
+                const response = await client.getMemo(memo.id);
+                if (conflict) {
+                  await deleteMobileSyncQueueItem(syncQueueScope, conflict.id);
+                }
+                await Promise.all([
+                  clearMobileMemoDraft(memo.id),
+                  upsertLocalMemo(dataScope, response.memo),
+                ]);
+                queryClient.setQueryData(["mobile", "memo", "notebook", memo.id], response);
+                queryClient.setQueryData(["mobile", "memo", "trash", memo.id], response);
+                await Promise.all([
+                  refreshSyncQueueItems(),
+                  queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+                  queryClient.invalidateQueries({ queryKey: ["mobile", "search"] }),
+                ]);
+              } catch (error) {
+                Alert.alert("加载失败", error instanceof Error ? error.message : "请稍后重试");
+              }
+            })();
+          },
+        },
+      ]
+    );
+  };
+
   const handleDeleteSelection = () => {
     const permanent = memoView === "trash";
     if (!permanent) {
@@ -792,6 +988,7 @@ export const WorkspaceScreen = () => {
 
     const summary = await loadMobileSyncQueueSummary(syncQueueScope);
     if (summary.pending + summary.error + summary.syncing === 0) {
+      await refreshSyncQueueItems();
       autoSyncRunningRef.current = false;
       return;
     }
@@ -816,6 +1013,7 @@ export const WorkspaceScreen = () => {
     } catch {
       // The queue keeps its retry metadata; the next scheduled pass resumes it.
     } finally {
+      await refreshSyncQueueItems();
       autoSyncRunningRef.current = false;
       if (autoSyncRequestedRef.current) {
         autoSyncRequestedRef.current = false;
@@ -992,14 +1190,16 @@ export const WorkspaceScreen = () => {
         isDeleting={deleteMemoMutation.isPending}
         isLoading={memoDetailQuery.isLoading}
         isRestoring={restoreMemoMutation.isPending}
-        isSaving={updateMemoMutation.isPending}
+        isSaving={updateMemoMutation.isPending || localUpdateMemoMutation.isPending}
         memo={selectedMemo}
         notebookName={notebooks.find((notebook) => notebook.id === selectedMemo?.notebookId)?.name ?? "未分类"}
         onClose={closeDetail}
         onDelete={handleDeleteMemo}
         onRichEdit={(memo) => void openRichEditor(memo)}
         onOpenRevisions={setRevisionMemo}
+        onResolveSyncConflict={handleMemoSyncConflict}
         onRestore={(memo) => restoreMemoMutation.mutate(memo)}
+        syncStatus={selectedMemoSyncStatus}
         visible={Boolean(selectedMemoId)}
       />
 
@@ -1027,7 +1227,17 @@ export const WorkspaceScreen = () => {
       {revisionMemo ? <RevisionHistoryModal
         memo={revisionMemo}
         onClose={() => setRevisionMemo(null)}
-        onRestored={(memo) => {
+        onRestored={async (memo) => {
+          const queuedItems = (await listMobileSyncQueueItems(syncQueueScope))
+            .filter((item) => item.memoId === memo.id);
+          await Promise.all([
+            ...queuedItems.map((item) => deleteMobileSyncQueueItem(syncQueueScope, item.id)),
+            clearMobileMemoDraft(memo.id),
+            upsertLocalMemo(dataScope, memo),
+          ]);
+          queryClient.setQueryData(["mobile", "memo", "notebook", memo.id], { memo });
+          queryClient.setQueryData(["mobile", "memo", "trash", memo.id], { memo });
+          await refreshSyncQueueItems();
           setRevisionMemo(null);
           setSelectedMemoId(memo.id);
         }}
@@ -1038,9 +1248,11 @@ export const WorkspaceScreen = () => {
         dataScope={dataScope}
         defaultNotebookId={createMemoNotebookId}
         imageCompressionEnabled={imageCompressionEnabled}
+        initialDraft={incomingClipDraft}
         notebooks={notebooks}
         onCreated={() => {
           setCreateOpen(false);
+          setIncomingClipDraft(null);
           setActiveView("notes");
           setMemoView("notebook");
           setSelectedMemoId(null);
@@ -1049,6 +1261,23 @@ export const WorkspaceScreen = () => {
         syncQueueScope={syncQueueScope}
         visible={createOpen}
       />
+
+      <Modal animationType="fade" statusBarTranslucent transparent visible={isImportingShare}>
+        <View style={styles.shareImportBackdrop}>
+          <View style={styles.shareImportCard}>
+            <ActivityIndicator color="#059669" size="large" />
+            <Text style={styles.shareImportTitle}>正在剪藏文章</Text>
+            <Text style={styles.shareImportDescription}>正在提取标题、正文和图片链接…</Text>
+          </View>
+          {incomingClipCaptureUrl ? (
+            <MobileWebClipCapture
+              onCaptured={handleRenderedClipCaptured}
+              onFailed={handleRenderedClipFailed}
+              url={incomingClipCaptureUrl}
+            />
+          ) : null}
+        </View>
+      </Modal>
 
       {selectionMoveOpen ? <MoveSelectionModal
         bottomOffset={58 + safeAreaInsets.bottom}
@@ -1666,7 +1895,11 @@ const SettingsView = ({
     { key: "general", label: "常规设置", icon: <SlidersHorizontal color="#059669" size={17} /> },
     { key: "account", label: "登录设置", icon: <ShieldCheck color="#059669" size={17} /> },
   ];
-  const title = tabs.find((tab) => tab.key === activeTab)?.label ?? "我的";
+  const systemInfoCopy = getMobileSystemInfoText(localePreference);
+  const activeTabItem = activeTab === "system"
+    ? { label: systemInfoCopy.title, icon: <Info color="#059669" size={17} /> }
+    : tabs.find((tab) => tab.key === activeTab);
+  const title = activeTabItem?.label ?? "我的";
   const activeLocaleLabel = MOBILE_LOCALE_OPTIONS.find((option) => option.value === localePreference)?.label ?? "跟随系统";
   const openLocalePicker = () => {
     localeSelectRef.current?.measureInWindow((left, top, width, height) => {
@@ -1692,6 +1925,13 @@ const SettingsView = ({
   }, [activeTab, onClose]);
 
   const renderContent = () => {
+    if (activeTab === "system") {
+      return (
+        <View style={styles.settingsDetailList}>
+          <SystemInfoCard defaultExpanded />
+        </View>
+      );
+    }
     if (activeTab === "general") {
       return (
         <View style={styles.settingsDetailList}>
@@ -1719,7 +1959,6 @@ const SettingsView = ({
                 </View>
               </View>
             </View>
-            <SystemInfoCard embedded />
           </SettingsGroup>
         </View>
       );
@@ -1758,7 +1997,7 @@ const SettingsView = ({
           <ChevronLeft color="#64748b" size={21} />
         </Pressable>
         <View style={styles.settingsHeaderTitle}>
-          {activeTab ? tabs.find((tab) => tab.key === activeTab)?.icon : <UserRound color="#047857" size={17} />}
+          {activeTab ? activeTabItem?.icon : <UserRound color="#047857" size={17} />}
           <Text numberOfLines={1} style={styles.settingsTitle}>{title}</Text>
         </View>
         <Pressable
@@ -1786,7 +2025,17 @@ const SettingsView = ({
               ))}
             </View>
             <View style={styles.settingsMenu}>
-              <Pressable accessibilityRole="link" onPress={openFeedback} style={styles.settingsMenuRow}>
+              <Pressable accessibilityRole="button" onPress={() => setActiveTab("system")} style={styles.settingsMenuRow}>
+                <View style={styles.settingsMenuLabel}>
+                  <View style={styles.settingsMenuIcon}><Info color="#059669" size={17} /></View>
+                  <View style={styles.settingsFeedbackCopy}>
+                    <Text style={styles.settingsMenuText}>{systemInfoCopy.title}</Text>
+                    <Text style={styles.settingsFeedbackDescription}>{systemInfoCopy.description}</Text>
+                  </View>
+                </View>
+                <ChevronRight color="#94a3b8" size={17} />
+              </Pressable>
+              <Pressable accessibilityRole="link" onPress={openFeedback} style={[styles.settingsMenuRow, styles.settingsMenuRowBorder]}>
                 <View style={styles.settingsMenuLabel}>
                   <View style={[styles.settingsMenuIcon, styles.settingsFeedbackIcon]}><MessageSquare color="#64748b" size={17} /></View>
                   <View style={styles.settingsFeedbackCopy}>
@@ -1842,6 +2091,7 @@ const CreateMemoModal = ({
   dataScope,
   defaultNotebookId,
   imageCompressionEnabled,
+  initialDraft,
   notebooks,
   onCreated,
   onQueued,
@@ -1852,6 +2102,7 @@ const CreateMemoModal = ({
   dataScope: string;
   defaultNotebookId: string;
   imageCompressionEnabled: boolean;
+  initialDraft?: MobileWebClipDraft | null;
   notebooks: Notebook[];
   onCreated: (memo: MemoDetail) => void;
   onQueued: () => void | Promise<void>;
@@ -1895,6 +2146,21 @@ const CreateMemoModal = ({
     let active = true;
     setDraftLoaded(false);
     setEditorReady(false);
+    if (initialDraft) {
+      const markdown = initialDraft.contentMarkdown;
+      contentMarkdownRef.current = markdown;
+      contentJsonRef.current = markdownToDoc(markdown);
+      draftVersionRef.current = 0;
+      setTitle(initialDraft.title);
+      setTagsText(initialDraft.tagsText);
+      setContentMarkdown(markdown);
+      setNotebookId(fallbackNotebookId);
+      setDirty(false);
+      setDraftLoaded(true);
+      return () => {
+        active = false;
+      };
+    }
     void readMobileNewMemoDraft(dataScope).then((draft) => {
       if (!active) {
         return;
@@ -1916,10 +2182,10 @@ const CreateMemoModal = ({
     return () => {
       active = false;
     };
-  }, [fallbackNotebookId, visible]);
+  }, [dataScope, fallbackNotebookId, initialDraft, visible]);
 
   useEffect(() => {
-    if (!visible || !draftLoaded || !dirty) {
+    if (!visible || !draftLoaded || !dirty || initialDraft) {
       return;
     }
     const draftVersion = draftVersionRef.current;
@@ -1949,7 +2215,7 @@ const CreateMemoModal = ({
       });
     }, 350);
     return () => clearTimeout(timeout);
-  }, [dataScope, dirty, draftLoaded, tagsText, targetNotebookId, title, visible, contentMarkdown]);
+  }, [dataScope, dirty, draftLoaded, initialDraft, tagsText, targetNotebookId, title, visible, contentMarkdown]);
 
   const createMutation = useMutation({
     mutationFn: async () => {
@@ -2028,7 +2294,9 @@ const CreateMemoModal = ({
       materializedMemoRef.current = null;
       draftVersionRef.current += 1;
       setDirty(false);
-      await clearMobileNewMemoDraft(dataScope);
+      if (!initialDraft) {
+        await clearMobileNewMemoDraft(dataScope);
+      }
       if (materializedMemoId) {
         await clearMobileMemoDraft(materializedMemoId);
       }
@@ -2054,7 +2322,9 @@ const CreateMemoModal = ({
     });
     materializedMemoRef.current = response.memo;
     await upsertLocalMemo(dataScope, response.memo);
-    await clearMobileNewMemoDraft(dataScope);
+    if (!initialDraft) {
+      await clearMobileNewMemoDraft(dataScope);
+    }
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["mobile", "notebooks"] }),
       queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
@@ -2273,9 +2543,9 @@ const CreateMemoModal = ({
   );
 };
 
-const SystemInfoCard = ({ embedded = false }: { embedded?: boolean }) => {
+const SystemInfoCard = ({ defaultExpanded = false }: { defaultExpanded?: boolean }) => {
   const [copied, setCopied] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const { checkForUpdate, hasUpdate, status } = useMobileUpdate();
   const localePreference = useMobileLocalePreference();
   const copy = getMobileSystemInfoText(localePreference);
@@ -2288,7 +2558,7 @@ const SystemInfoCard = ({ embedded = false }: { embedded?: boolean }) => {
   };
 
   return (
-    <View style={[styles.settingsGroup, embedded && styles.settingsEmbeddedSection]}>
+    <View style={styles.settingsGroup}>
       <Pressable accessibilityState={{ expanded }} onPress={() => setExpanded((value) => !value)} style={styles.settingsAccordionHeader}>
         <View style={styles.settingsLinkCopy}>
           <View style={styles.settingsGroupHeader}>
@@ -2349,7 +2619,7 @@ const RevisionHistoryModal = ({
 }: {
   memo: MemoDetail | null;
   onClose: () => void;
-  onRestored: (memo: MemoDetail) => void;
+  onRestored: (memo: MemoDetail) => void | Promise<void>;
 }) => {
   const { client } = useSession();
   const queryClient = useQueryClient();
@@ -2403,7 +2673,7 @@ const RevisionHistoryModal = ({
         queryClient.invalidateQueries({ queryKey: ["mobile", "memo"] }),
         queryClient.invalidateQueries({ queryKey: ["mobile", "memo-revisions", restoredMemo.id] }),
       ]);
-      onRestored(restoredMemo);
+      await onRestored(restoredMemo);
     },
   });
 
@@ -2657,7 +2927,9 @@ const MemoDetailModal = ({
   onDelete,
   onRichEdit,
   onOpenRevisions,
+  onResolveSyncConflict,
   onRestore,
+  syncStatus,
   visible,
 }: {
   isDeleting: boolean;
@@ -2670,7 +2942,9 @@ const MemoDetailModal = ({
   onDelete: (memo: MemoDetail) => void;
   onRichEdit: (memo: MemoDetail) => void;
   onOpenRevisions: (memo: MemoDetail) => void;
+  onResolveSyncConflict: (memo: MemoDetail) => void;
   onRestore: (memo: MemoDetail) => void;
+  syncStatus: MobileSyncQueueItem["status"] | null;
   visible: boolean;
 }) => {
   const { session } = useSession();
@@ -2770,6 +3044,15 @@ const MemoDetailModal = ({
   const detailText = memo?.contentMarkdown || memo?.contentText || "没有正文内容";
   const searchMatches = useMemo(() => getTextSearchMatches(detailText, searchQuery), [detailText, searchQuery]);
   const searchMatchLabel = searchQuery.trim() ? `${searchMatches.length > 0 ? activeMatchIndex + 1 : 0}/${searchMatches.length}` : "0/0";
+  const syncStatusLabel = isSaving || syncStatus === "syncing"
+    ? "保存中"
+    : syncStatus === "conflict"
+      ? "同步冲突"
+      : syncStatus === "error"
+        ? "同步失败"
+        : syncStatus === "pending"
+          ? "待同步"
+          : "已同步";
   const editFabBottom = Math.max(
     safeAreaInsets.bottom,
     Platform.OS === "android" ? ANDROID_SYSTEM_NAVIGATION_FALLBACK : 0
@@ -2800,7 +3083,30 @@ const MemoDetailModal = ({
             <ChevronLeft color="#475569" size={21} />
           </Pressable>
           <View style={styles.detailHeaderActions}>
-            <Text numberOfLines={1} style={styles.detailSyncStatus}>{isSaving ? "保存中" : "已保存"}</Text>
+            <Pressable
+              accessibilityHint={syncStatus === "conflict" ? "查看并处理同步冲突" : undefined}
+              accessibilityLabel={syncStatusLabel}
+              accessibilityRole={syncStatus === "conflict" ? "button" : "text"}
+              disabled={syncStatus !== "conflict" || !memo}
+              onPress={() => memo && onResolveSyncConflict(memo)}
+            >
+              <Text
+                numberOfLines={1}
+                style={[styles.detailSyncStatus, syncStatus === "conflict" && styles.detailSyncStatusConflict]}
+              >
+                {syncStatusLabel}
+              </Text>
+            </Pressable>
+            {memo && !memo.isDeleted ? (
+              <Pressable
+                accessibilityLabel="版本历史"
+                accessibilityRole="button"
+                onPress={() => onOpenRevisions(memo)}
+                style={styles.detailHeaderIconButton}
+              >
+                <History color="#475569" size={20} />
+              </Pressable>
+            ) : null}
             {memo?.isDeleted ? (
               <Pressable accessibilityLabel="笔记操作" accessibilityRole="button" onPress={() => setActionsOpen(true)} style={styles.detailHeaderIconButton}>
                 <MoreHorizontal color="#475569" size={21} />
@@ -4143,6 +4449,7 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
     ? {
         appIdentifier: "App identifier",
         build: "Build",
+        client: "Client",
         description: "View the current app version, build identifier, and runtime environment.",
         disconnected: "Disconnected",
         followSystem: "Follow system",
@@ -4152,8 +4459,9 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         memoCount: "Notes",
         notSet: "Not set",
         notebookCount: "Notebooks",
-        platform: "Platform",
-        platformVersion: "Platform version",
+        platform: "System",
+        mobileApp: "Mobile app",
+        platformVersion: "System version",
         timeZone: "Time zone",
         title: "System info",
         unknown: "Unknown",
@@ -4162,6 +4470,7 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
     : {
         appIdentifier: "应用标识",
         build: "构建",
+        client: "客户端",
         description: "查看当前应用版本、构建标识和运行环境。",
         disconnected: "未连接",
         followSystem: "跟随系统",
@@ -4171,8 +4480,9 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
         memoCount: "笔记总数",
         notSet: "未设置",
         notebookCount: "笔记本数量",
-        platform: "平台",
-        platformVersion: "平台版本",
+        platform: "系统",
+        mobileApp: "移动应用",
+        platformVersion: "系统版本",
         timeZone: "时区",
         title: "系统信息",
         unknown: "未知",
@@ -4182,11 +4492,22 @@ const getMobileSystemInfoText = (localePreference: MobileLocaleMode) =>
 const getMobileSystemInfoItems = (localePreference: MobileLocaleMode) => {
   const copy = getMobileSystemInfoText(localePreference);
   const resolvedLocale = getResolvedMobileLocale(localePreference);
+  const platformName =
+    Platform.OS === "android"
+      ? "Android"
+      : Platform.OS === "ios"
+        ? "iOS"
+        : Platform.OS === "macos"
+          ? "macOS"
+          : Platform.OS === "windows"
+            ? "Windows"
+            : Platform.OS;
 
   return [
     { label: copy.version, value: `v${MOBILE_APP_VERSION}` },
     { label: copy.build, value: __DEV__ ? "development" : "production" },
-    { label: copy.platform, value: Platform.OS },
+    { label: copy.client, value: copy.mobileApp },
+    { label: copy.platform, value: platformName },
     { label: copy.platformVersion, value: String(Platform.Version) },
     { label: copy.language, value: localePreference === "system" ? `${resolvedLocale} (${copy.followSystem})` : resolvedLocale },
     { label: copy.timeZone, value: Intl.DateTimeFormat().resolvedOptions().timeZone || copy.unknown },
@@ -4760,14 +5081,6 @@ const baseWorkspaceStyles = StyleSheet.create({
     borderWidth: 0,
   },
   settingsAiEmbeddedCard: {
-    borderBottomWidth: 0,
-    borderLeftWidth: 0,
-    borderRadius: 0,
-    borderRightWidth: 0,
-    borderTopColor: "#f1f5f9",
-    borderTopWidth: 1,
-  },
-  settingsEmbeddedSection: {
     borderBottomWidth: 0,
     borderLeftWidth: 0,
     borderRadius: 0,
@@ -6075,6 +6388,11 @@ const baseWorkspaceStyles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
+  detailSyncStatusConflict: {
+    backgroundColor: "#fff7ed",
+    color: "#c2410c",
+    fontWeight: "700",
+  },
   detailMetaRow: {
     alignItems: "center",
     flexDirection: "row",
@@ -6469,6 +6787,35 @@ const baseWorkspaceStyles = StyleSheet.create({
     backgroundColor: "#000000",
     flex: 1,
     justifyContent: "center",
+  },
+  shareImportBackdrop: {
+    alignItems: "center",
+    backgroundColor: "rgba(15, 23, 42, 0.42)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 24,
+  },
+  shareImportCard: {
+    alignItems: "center",
+    backgroundColor: "#ffffff",
+    borderRadius: 18,
+    gap: 10,
+    maxWidth: 340,
+    paddingHorizontal: 28,
+    paddingVertical: 26,
+    width: "100%",
+  },
+  shareImportTitle: {
+    color: "#0f172a",
+    fontSize: 17,
+    fontWeight: "800",
+    marginTop: 4,
+  },
+  shareImportDescription: {
+    color: "#64748b",
+    fontSize: 13,
+    lineHeight: 20,
+    textAlign: "center",
   },
 });
 
