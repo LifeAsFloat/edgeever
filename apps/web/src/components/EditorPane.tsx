@@ -111,6 +111,7 @@ import { compressImageForUpload } from "@/lib/image-compression";
 import { localDb, type MemoUpdateSyncPayload } from "@/lib/local-db";
 import { getMemoUpdateQueueId, isMemoUpdateAlreadyApplied, queueMemoUpdate, shouldQueueMemoSaveError } from "@/lib/sync-queue";
 import { isLocalMemoId } from "@/lib/local-mirror";
+import { shouldAcceptRemoteMemoDetail } from "@/lib/memo-detail-freshness";
 import type { EdgeEverRepository } from "@/lib/repository";
 import {
   EDITOR_LOCAL_SAVE_DELAY_MS,
@@ -163,7 +164,7 @@ const IconTooltip = ({ label, children }: { label: string; children: ReactNode }
 type NoteLinkHintPosition = {
   left: number;
   top: number;
-  placement: "above" | "below";
+  placement: "above" | "below" | "inside-bottom-right";
 };
 
 type AttachmentMenuTarget = {
@@ -273,7 +274,11 @@ const ResourceActionMenu = ({
     style={{
       left: target.position.left,
       top: target.position.top,
-      transform: target.position.placement === "above" ? "translate(-50%, -100%)" : "translateX(-50%)",
+      transform: target.position.placement === "inside-bottom-right"
+        ? "translate(-100%, -100%)"
+        : target.position.placement === "above"
+          ? "translate(-50%, -100%)"
+          : "translateX(-50%)",
     }}
     onMouseEnter={onMouseEnter}
     onMouseLeave={onMouseLeave}
@@ -603,12 +608,11 @@ const ResizableImageNodeView = ({ editor, node, selected, updateAttributes, dele
                 key={preset.width}
                 type="button"
                 className={cn("edgeever-image-preset", width === preset.width && "is-active")}
-                title={t("editor.scaleTo", { percent: preset.width })}
-                aria-label={`${t(preset.labelKey)}，${t("editor.scaleTo", { percent: preset.width })}`}
+                title={t(preset.labelKey)}
+                aria-label={t(preset.labelKey)}
                 onClick={() => updateWidth(preset.width)}
               >
                 <span>{t(preset.labelKey)}</span>
-                <span className="edgeever-image-preset-percent">{preset.width}%</span>
               </button>
             ))}
           </div>
@@ -953,6 +957,8 @@ const RichEditorPane = ({
   const noteReplaceInputRef = useRef<HTMLInputElement | null>(null);
   const hydratingRef = useRef(false);
   const hydratedMemoIdRef = useRef<string | null>(null);
+  /** Last content source applied to the editor — used to skip redundant setContent. */
+  const appliedEditorSourceKeyRef = useRef<string | null>(null);
   const hasUnsavedChangesRef = useRef(false);
   const editingMemoIdRef = useRef<string | null>(memo?.id ?? null);
   const imageCompressionEnabledRef = useRef(imageCompressionEnabled);
@@ -1307,14 +1313,13 @@ const RichEditorPane = ({
       if (!detail?.element) return;
       cancelResourceMenuHide();
       const rect = detail.element.getBoundingClientRect();
-      const placement = rect.top < 56 ? "below" : "above";
       setResourceMenuTarget({
         ...detail,
         kind: "image",
         position: {
-          left: Math.min(Math.max(rect.left + rect.width / 2, 12), window.innerWidth - 12),
-          top: placement === "above" ? rect.top - 8 : rect.bottom + 8,
-          placement,
+          left: Math.min(Math.max(rect.right - 8, 12), window.innerWidth - 12),
+          top: Math.min(Math.max(rect.bottom - 8, 12), window.innerHeight - 12),
+          placement: "inside-bottom-right",
         },
       });
     };
@@ -1819,6 +1824,7 @@ const RichEditorPane = ({
       memoRef.current = null;
       editSessionRef.current = null;
       hydratedMemoIdRef.current = null;
+      appliedEditorSourceKeyRef.current = null;
       setHydratedEditorMemoId(null);
       editingMemoIdRef.current = null;
       hasUnsavedChangesRef.current = false;
@@ -1836,25 +1842,72 @@ const RichEditorPane = ({
       return;
     }
 
+    const previousMemo = memoRef.current;
     const sameMemo = editingMemoIdRef.current === memo.id;
-    memoRef.current = memo;
 
     if (!sameMemo) {
       hydratedMemoIdRef.current = null;
+      appliedEditorSourceKeyRef.current = null;
       setHydratedEditorMemoId(null);
     }
 
+    // While the user still has unsaved keystrokes, ignore memo prop churn entirely
+    // unless the incoming snapshot is strictly fresher (e.g. another device).
     if (sameMemo && hasUnsavedChangesRef.current && !memo.isDeleted) {
+      if (previousMemo && shouldAcceptRemoteMemoDetail(previousMemo, memo)) {
+        memoRef.current = memo;
+      }
       return;
     }
 
+    // After local autosave clears dirty, reject stale remote props that would
+    // call setContent and roll the document back (cursor jump / deleted text returns).
+    if (
+      sameMemo &&
+      !memo.isDeleted &&
+      previousMemo &&
+      previousMemo.id === memo.id &&
+      !shouldAcceptRemoteMemoDetail(previousMemo, memo)
+    ) {
+      return;
+    }
+
+    // Same memo already on screen and the query only re-emitted an equivalent
+    // snapshot (common when switching away/back triggers a detail refetch).
+    // Refresh the edit session quietly — never touch document or selection.
+    if (
+      sameMemo &&
+      !memo.isDeleted &&
+      hydratedMemoIdRef.current === memo.id &&
+      previousMemo &&
+      previousMemo.id === memo.id &&
+      previousMemo.revision === memo.revision &&
+      previousMemo.updatedAt === memo.updatedAt &&
+      previousMemo.contentHash === memo.contentHash &&
+      previousMemo.title === memo.title &&
+      previousMemo.tags.length === memo.tags.length &&
+      previousMemo.tags.every((tag, index) => tag === memo.tags[index])
+    ) {
+      memoRef.current = memo;
+      if (!requiresLocalEditSession(memo)) {
+        void api.createMemoEditSession(memo.id).then((response) => {
+          if (cancelled || editingMemoIdRef.current !== memo.id) return;
+          editSessionRef.current = response.editSession;
+        }).catch(() => {
+          // Keep the previous session; the next save can open a new one.
+        });
+      }
+      return;
+    }
+
+    memoRef.current = memo;
+
     void (async () => {
-      let [draft, queuedUpdate, editSessionResponse] = memo.isDeleted
-        ? [null, null, null]
+      let [draft, queuedUpdate] = memo.isDeleted
+        ? [null, null]
         : await Promise.all([
             localDb.drafts.get(memo.id),
             localDb.syncQueue.get(getMemoUpdateQueueId(memo.id)),
-            requiresLocalEditSession(memo) ? Promise.resolve(null) : api.createMemoEditSession(memo.id),
           ]);
 
       if (cancelled) {
@@ -1873,13 +1926,74 @@ const RichEditorPane = ({
       const draftUpdatedAt = draft ? Date.parse(draft.updatedAt) : 0;
       const remoteUpdatedAt = Date.parse(memo.updatedAt);
       const useDraft = Boolean(draft && (queuedUpdate || draftUpdatedAt >= remoteUpdatedAt));
-      const nextTitle = useDraft && draft ? draft.title : getEditableMemoTitle(memo.title);
-      const nextTagsText = useDraft && draft ? draft.tagsText : memo.tags.join(", ");
+      const queuedPayload =
+        queuedUpdate && queuedUpdate.kind === "memo.update"
+          ? (queuedUpdate.payload as MemoUpdateSyncPayload)
+          : null;
+      // Prefer an unpushed local queue payload over a stale memo prop when the
+      // draft was already cleared by a successful local save.
+      const useQueuedPayload = Boolean(queuedPayload && !useDraft && !isMemoUpdateAlreadyApplied(memo, queuedUpdate!));
+
+      const nextTitle = useDraft && draft
+        ? draft.title
+        : useQueuedPayload && queuedPayload
+          ? getEditableMemoTitle(queuedPayload.title)
+          : getEditableMemoTitle(memo.title);
+      const nextTagsText = useDraft && draft
+        ? draft.tagsText
+        : useQueuedPayload && queuedPayload
+          ? queuedPayload.tags.join(", ")
+          : memo.tags.join(", ");
       const nextContent = useDraft && draft
         ? draft.contentJson
-        : resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown);
+        : useQueuedPayload && queuedPayload
+          ? queuedPayload.contentJson
+          : resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown);
       const nextMarkdown = docToMarkdown(nextContent);
       const nextHasUnsavedChanges = Boolean(useDraft && !queuedUpdate);
+      const sourceKey = useDraft && draft
+        ? `draft:${memo.id}:${draft.updatedAt}:${nextTitle}:${nextTagsText}:${nextMarkdown}`
+        : useQueuedPayload && queuedUpdate
+          ? `queue:${memo.id}:${queuedUpdate.updatedAt}:${nextTitle}:${nextTagsText}:${nextMarkdown}`
+          : `memo:${memo.id}:${memo.revision}:${memo.updatedAt}:${memo.contentHash}:${nextTitle}:${nextTagsText}:${nextMarkdown}`;
+
+      const alreadyHydratedSameMemo = sameMemo && hydratedMemoIdRef.current === memo.id;
+      const editorMarkdownMatches = Boolean(
+        alreadyHydratedSameMemo &&
+        isEditorReady(currentEditor) &&
+        docToMarkdown(currentEditor.getJSON() as TiptapDoc) === nextMarkdown &&
+        title === nextTitle &&
+        tagsText === nextTagsText
+      );
+      const sourceAlreadyApplied = alreadyHydratedSameMemo && appliedEditorSourceKeyRef.current === sourceKey;
+
+      // Skip a full document replace when content already matches — setContent
+      // always resets the selection and feels like a line jump / jump-to-end.
+      if (sourceAlreadyApplied || editorMarkdownMatches) {
+        editingMemoIdRef.current = memo.id;
+        appliedEditorSourceKeyRef.current = sourceKey;
+        if (queuedUpdate) {
+          setSaveState(syncStatusToSaveState(queuedUpdate.status));
+        }
+        if (requiresLocalEditSession(memo)) {
+          editSessionRef.current = editSessionRef.current ?? createLocalEditSession(memo);
+        } else {
+          void api.createMemoEditSession(memo.id).then((response) => {
+            if (cancelled || editingMemoIdRef.current !== memo.id) return;
+            editSessionRef.current = response.editSession;
+          }).catch(() => {
+            // Keep any previous session for this memo.
+          });
+        }
+        return;
+      }
+
+      const previousSelection = alreadyHydratedSameMemo && isEditorReady(currentEditor)
+        ? {
+            from: currentEditor.state.selection.from,
+            to: currentEditor.state.selection.to,
+          }
+        : null;
 
       hydratingRef.current = true;
       editingMemoIdRef.current = memo.id;
@@ -1899,11 +2013,33 @@ const RichEditorPane = ({
           console.error("Failed to set TipTap contentJson, falling back to markdownToDoc:", err);
           currentEditor.commands.setContent(markdownToDoc(nextMarkdown));
         }
+
+        // Re-applying content on an already-open note (e.g. draft vs server)
+        // must not yank the caret to the document end.
+        if (previousSelection) {
+          const maxPos = currentEditor.state.doc.content.size;
+          const from = Math.max(1, Math.min(previousSelection.from, maxPos));
+          const to = Math.max(1, Math.min(previousSelection.to, maxPos));
+          currentEditor.commands.setTextSelection({ from, to });
+        }
       }
 
+      appliedEditorSourceKeyRef.current = sourceKey;
       hydratedMemoIdRef.current = memo.id;
-      editSessionRef.current = editSessionResponse?.editSession ?? (requiresLocalEditSession(memo) ? createLocalEditSession(memo) : null);
       setHydratedEditorMemoId(memo.id);
+
+      if (requiresLocalEditSession(memo)) {
+        editSessionRef.current = createLocalEditSession(memo);
+      } else {
+        // Do not block first paint / caret on the edit-session network round-trip.
+        void api.createMemoEditSession(memo.id).then((response) => {
+          if (cancelled || editingMemoIdRef.current !== memo.id) return;
+          editSessionRef.current = response.editSession;
+        }).catch(() => {
+          if (cancelled || editingMemoIdRef.current !== memo.id) return;
+          editSessionRef.current = createLocalEditSession(memo);
+        });
+      }
 
       window.setTimeout(() => {
         hydratingRef.current = false;
@@ -1913,6 +2049,9 @@ const RichEditorPane = ({
     return () => {
       cancelled = true;
     };
+    // title/tagsText are read only for same-content skip detection; re-running on
+    // every keystroke would re-hydrate the editor while the user is typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
   }, [isTrashView, memo, editor]);
 
   useEffect(() => {
