@@ -4,29 +4,27 @@ import { Image } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { hasPicGoBridge, readPicGoPreference, takePicGoServerKey, writePicGoPreference, type PicGoPreference } from "@/lib/picgo";
+import { hasPicGoBridge, readPicGoPreference, writePicGoPreference, type PicGoPreference } from "@/lib/picgo";
 import { SETTINGS_ITEM_DESCRIPTION_CLASSNAME, SETTINGS_ITEM_TITLE_CLASSNAME } from "./settings-ui";
-
-const picGoTargetId = (value: PicGoPreference) => `${value.endpoint}\0${value.serverKey}`;
 
 export const PicGoSettingsItem = () => {
   const { t } = useTranslation();
   const [saved, setSaved] = useState(readPicGoPreference);
   const [draft, setDraft] = useState(saved);
-  const [testedTarget, setTestedTarget] = useState<string | null>(null);
+  const [testedEndpoint, setTestedEndpoint] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const desktopAvailable = hasPicGoBridge();
-  const dirty = draft.provider !== saved.provider || draft.endpoint !== saved.endpoint || draft.serverKey !== saved.serverKey;
-  const canSave = dirty && (draft.provider === "edgeever" || (desktopAvailable && testedTarget === picGoTargetId(draft)));
+  const dirty = draft.provider !== saved.provider || draft.endpoint !== saved.endpoint;
+  const canSave = dirty && (draft.provider === "edgeever" || (desktopAvailable && testedEndpoint === draft.endpoint));
 
   const testConnection = async () => {
     setBusy(true);
-    setTestedTarget(null);
+    setTestedEndpoint(null);
     setStatus("");
     try {
-      await window.edgeeverDesktop!.testPicGoConnection({ endpoint: draft.endpoint, serverKey: draft.serverKey });
-      setTestedTarget(picGoTargetId(draft));
+      await window.edgeeverDesktop!.testPicGoConnection(draft.endpoint);
+      setTestedEndpoint(draft.endpoint);
       setStatus(t("settings.picgo.connected"));
     } catch {
       setStatus(t("settings.picgo.connectionFailed"));
@@ -64,18 +62,10 @@ export const PicGoSettingsItem = () => {
           <p className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.picgo.description")}</p>
           <label htmlFor="picgo-endpoint" className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.picgo.endpoint")}</label>
           <Input id="picgo-endpoint" value={draft.endpoint} disabled={busy} onChange={(event) => {
-            const next = takePicGoServerKey(event.target.value);
-            setDraft({ ...draft, endpoint: next.endpoint, serverKey: next.serverKey ?? draft.serverKey });
-            setTestedTarget(null);
+            setDraft({ ...draft, endpoint: event.target.value.trim() });
+            setTestedEndpoint(null);
             setStatus("");
-          }} spellCheck={false} inputMode="url" autoComplete="off" />
-          <label htmlFor="picgo-server-key" className={SETTINGS_ITEM_TITLE_CLASSNAME}>{t("settings.picgo.serverKey")}</label>
-          <Input id="picgo-server-key" name="picgo-server-key" type="password" value={draft.serverKey} disabled={busy} onChange={(event) => {
-            setDraft({ ...draft, serverKey: event.target.value.trim() });
-            setTestedTarget(null);
-            setStatus("");
-          }} spellCheck={false} autoComplete="new-password" maxLength={512} />
-          <p className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.picgo.serverKeyDescription")}</p>
+          }} spellCheck={false} />
           <p className={SETTINGS_ITEM_DESCRIPTION_CLASSNAME}>{t("settings.picgo.externalImages")}</p>
         </div>
       ) : null}
